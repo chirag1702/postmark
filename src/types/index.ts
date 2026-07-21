@@ -27,6 +27,7 @@ export interface Mailbox {
   sendPin?: string | null;
   lockPin?: string | null;
   locked?: boolean;
+  backfillComplete?: boolean;
 }
 
 export interface User {

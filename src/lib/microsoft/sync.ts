@@ -47,6 +47,7 @@ function isFolderPending(cursor: GraphCursor, folderName: string): boolean {
 interface GraphDeltaMessage {
   id?: string;
   conversationId?: string;
+  receivedDateTime?: string;
   "@removed"?: { reason: string };
 }
 
@@ -54,6 +55,17 @@ interface GraphDeltaResponse {
   value: GraphDeltaMessage[];
   "@odata.nextLink"?: string;
   "@odata.deltaLink"?: string;
+}
+
+// Module 6 (revised): initial fetch is bounded to the last 10 days, not full history.
+// Microsoft Graph's documented `$filter` support on `/messages/delta` is narrow and
+// inconsistent across mail resources, so the bound is enforced client-side here instead of
+// trusting a server-side `$filter` on the delta endpoint to compose correctly.
+const BACKFILL_WINDOW_MS = 10 * 24 * 60 * 60 * 1000;
+
+function isWithinBackfillWindow(receivedDateTime: string | undefined, cutoff: Date): boolean {
+  if (!receivedDateTime) return true; // no date to judge by -- don't drop it defensively
+  return new Date(receivedDateTime) >= cutoff;
 }
 
 export class GraphHttpError extends Error {
@@ -102,10 +114,14 @@ export function graphPost(accessToken: string, url: string, body: unknown): Prom
 
 function extractMessages(
   data: GraphDeltaResponse,
-  folder: SyncableFolderId
+  folder: SyncableFolderId,
+  backfillCutoff?: Date
 ): FetchMessagesResult["messages"] {
   return data.value
-    .filter((m): m is { id: string; conversationId?: string } => Boolean(m.id) && !m["@removed"])
+    .filter(
+      (m): m is GraphDeltaMessage & { id: string } => Boolean(m.id) && !m["@removed"]
+    )
+    .filter((m) => !backfillCutoff || isWithinBackfillWindow(m.receivedDateTime, backfillCutoff))
     .map((m) => ({ providerMessageId: m.id, threadId: m.conversationId ?? null, folder }));
 }
 
@@ -129,7 +145,8 @@ async function backfillOneFolder(
   const existing = cursor[target.name];
   const url =
     existing?.link ??
-    `${GRAPH_BASE}/me/mailFolders/${target.name}/messages/delta?$select=id,conversationId`;
+    `${GRAPH_BASE}/me/mailFolders/${target.name}/messages/delta?$select=id,conversationId,receivedDateTime`;
+  const backfillCutoff = new Date(Date.now() - BACKFILL_WINDOW_MS);
 
   let data: GraphDeltaResponse;
   try {
@@ -155,7 +172,7 @@ async function backfillOneFolder(
   }
 
   return {
-    messages: extractMessages(data, target.folder),
+    messages: extractMessages(data, target.folder, backfillCutoff),
     nextCursor: JSON.stringify(cursor),
     hasMore: WELL_KNOWN_FOLDERS.some((f) => isFolderPending(cursor, f.name)),
   };

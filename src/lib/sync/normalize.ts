@@ -18,8 +18,9 @@ interface EmailInsertRow {
  * already persists those messages (with tracking) at send time, so syncing them again would
  * create untracked duplicates.
  *
- * Throws if any message in the page fails to persist, so pg-boss retries the whole job -- safe
- * because the upsert is idempotent, so a retry just re-skips whatever already succeeded.
+ * Throws if any message in the page fails to persist, so the caller's retry (a manual resync,
+ * or the OAuth callback's own retry-free best-effort attempt) starts over cleanly -- safe because
+ * the upsert is idempotent, so a retry just re-skips whatever already succeeded.
  */
 export async function processMessagePage(
   admin: SupabaseClient,

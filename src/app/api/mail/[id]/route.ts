@@ -1,8 +1,9 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { getProviderAdapter, ProviderMethodNotImplementedError } from "@/lib/providers";
 import { MAIL_SELECT, shapeEmail, type EmailRow } from "@/lib/mail/shape";
-import { enqueueMailWritebackJob } from "@/lib/sync/enqueue";
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 
@@ -87,16 +88,39 @@ export async function PATCH(
   // Sent mail has no provider_message_id (Module 3's send path doesn't persist the Gmail/Graph
   // message id it gets back), so there's nothing addressable to write back to for those rows.
   if (row.provider_message_id) {
-    try {
-      await enqueueMailWritebackJob({
-        mailboxId: row.mailbox_id,
-        providerMessageId: row.provider_message_id,
-        patch: parsedBody.data,
-      });
-    } catch (err) {
-      // Never let a queue hiccup block the (already-successful) local write from returning.
-      console.error("Failed to enqueue mail write-back job", err);
-    }
+    const mailboxId = row.mailbox_id;
+    const providerMessageId = row.provider_message_id;
+    const patch = parsedBody.data;
+
+    after(async () => {
+      const admin = createAdminClient();
+      const { data: mailbox } = await admin
+        .from("mailboxes")
+        .select("provider")
+        .eq("id", mailboxId)
+        .maybeSingle<{ provider: "gmail" | "outlook" }>();
+      if (!mailbox) return; // mailbox was disconnected/deleted since this PATCH was issued
+
+      const adapter = getProviderAdapter(mailbox.provider);
+      try {
+        if (patch.starred !== undefined || patch.unread !== undefined) {
+          await adapter.applyFlags(admin, {
+            mailboxId,
+            providerMessageId,
+            flags: { starred: patch.starred, unread: patch.unread },
+          });
+        }
+        if (patch.folder !== undefined) {
+          await adapter.moveToFolder(admin, { mailboxId, providerMessageId, folder: patch.folder });
+        }
+      } catch (err) {
+        if (err instanceof ProviderMethodNotImplementedError) {
+          console.warn(`mail write-back: skipping unsupported action -- ${err.message}`);
+          return;
+        }
+        console.error("Deferred mail write-back failed", err);
+      }
+    });
   }
 
   return NextResponse.json(shapeEmail(row));

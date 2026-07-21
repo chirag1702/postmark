@@ -1,6 +1,7 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import {
   exchangeCodeForTokens,
   fetchMicrosoftUserEmail,
@@ -8,7 +9,6 @@ import {
 } from "@/lib/microsoft/oauth-client";
 import { MICROSOFT_OAUTH_STATE_COOKIE } from "@/lib/microsoft/oauth-state";
 import { encryptToken } from "@/lib/crypto/token-cipher";
-import { enqueueBackfillJob } from "@/lib/sync/enqueue";
 
 const callbackQuerySchema = z.object({
   code: z.string().optional(),
@@ -71,13 +71,30 @@ export async function GET(request: NextRequest) {
       return redirectWithReason(request, reason);
     }
 
-    try {
-      await enqueueBackfillJob(mailbox.id);
-    } catch (err) {
-      // Don't block the OAuth flow on a queue hiccup -- the mailbox is connected either way;
-      // worst case is an empty inbox until a manual resync (POST /api/internal/sync/.../backfill).
-      console.error("Failed to enqueue initial backfill", err);
+    const admin = createAdminClient();
+    const { error: syncStateError } = await admin
+      .from("sync_state")
+      .upsert(
+        { mailbox_id: mailbox.id, provider: "outlook", backfill_complete: false },
+        { onConflict: "mailbox_id" }
+      );
+    if (syncStateError) {
+      // Don't block the OAuth flow on this -- the mailbox is connected either way; worst case
+      // is the mailbox never shows the "setting up" state and stays empty until a manual resync.
+      console.error("Failed to initialize sync_state", syncStateError);
     }
+
+    const origin = process.env.NEXT_PUBLIC_APP_URL ?? request.nextUrl.origin;
+    after(async () => {
+      try {
+        await fetch(`${origin}/api/internal/sync/${mailbox.id}/backfill`, {
+          method: "POST",
+          headers: { "x-internal-sync-secret": process.env.INTERNAL_SYNC_SECRET ?? "" },
+        });
+      } catch (err) {
+        console.error("Deferred initial backfill request failed", err);
+      }
+    });
 
     const res = NextResponse.redirect(
       new URL("/mail?mailbox=connected&provider=outlook", request.url)

@@ -41,3 +41,6 @@ yarn-error.log*
 next-env.d.ts
 
 .vercel
+
+# ops scripts with no place in the deployed app -- not for commit
+/deploy-worker.sh

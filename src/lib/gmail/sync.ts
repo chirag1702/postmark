@@ -51,6 +51,9 @@ export async function fetchGmailMessages(
       // Gmail excludes Trash (and Spam) from list results by default -- without this, the
       // "trash" folder mapping below would never actually be reachable during backfill.
       includeSpamTrash: true,
+      // Module 6 (revised): initial fetch is bounded to the last 10 days, not full history --
+      // must be resent identically on every page, since `pageToken` alone doesn't remember `q`.
+      q: "newer_than:10d",
     });
 
     const messages = (data.messages ?? [])

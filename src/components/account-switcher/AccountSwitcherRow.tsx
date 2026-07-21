@@ -33,6 +33,11 @@ export function AccountSwitcherRow({
           {account.provider}
         </p>
       </div>
+      {account.backfillComplete === false && (
+        <span title="Setting up…">
+          <Dot size={6} color="var(--color-ink-faint)" pulse />
+        </span>
+      )}
       {unreadCount > 0 && <Badge>{unreadCount}</Badge>}
       {active && <Dot size={6} color="var(--color-ink-primary)" />}
     </button>

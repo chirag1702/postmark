@@ -4,13 +4,14 @@ Postmark is currently a **UI-only template**: every screen, interaction, and ani
 
 This document breaks the remaining work into modules. Implementing all of them turns the template into a fully working, real multi-mailbox email client with per-recipient read receipts — the product's core differentiator. Modules are **ordered by usefulness/impact**: the sequence that proves the core value proposition end-to-end as fast as possible, then fills in real inbound sync, then closes UI-parity gaps, then adds genuine enhancements.
 
-Backend is built entirely on **Next.js Route Handlers** (`app/api/**/route.ts`) — no separate server.
+Backend is built entirely on **Next.js Route Handlers** (`app/api/**/route.ts`) — no separate server, and (as of this revision) no separate background worker process either.
 
 ### Cross-cutting constraints (apply to every module below)
 
 - **Auth & storage: Supabase.** Supabase Auth for user accounts/sessions, Supabase Postgres for all application data. No separate auth library, no separate database host.
 - **Providers, for now: Google (Gmail) and Microsoft (Outlook) only.** iCloud/generic IMAP and Hotmail-specific work are natural future extensions of the same patterns (Hotmail is already a Microsoft Graph account under the hood) but are explicitly out of scope until later.
-- **No paid services or paid tiers, anywhere.** Every module uses free/open-source tooling or a generous free tier. This is why the plan uses a Postgres-native job queue instead of Redis, Supabase Storage instead of S3/Vercel Blob, and polling instead of a paid push-broker (e.g. GCP Pub/Sub) as the *required* baseline.
+- **No paid services or paid tiers, anywhere.** Every module uses free/open-source tooling or a generous free tier — this includes Google Cloud Pub/Sub (Module 9) and Supabase Realtime (Module 8), both comfortably inside their free tiers at this product's scale. Supabase Storage (not S3/Vercel Blob) is used for attachment storage for the same reason.
+- **No background job queue or worker process.** All backend work runs inside Vercel Route Handlers — either inline or deferred past the response with Next.js's `after()` API (`next/server`). Initial mailbox sync and push-subscription renewal are both triggered by user activity (connecting a mailbox, switching to it), not a schedule — there is no cron job anywhere in this design.
 - **Validation:** every Route Handler validates input with `zod`.
 - **Secrets:** PINs (`Mailbox.sendPin`/`lockPin`) and OAuth tokens are hashed/encrypted at rest (`bcrypt` or Postgres `pgcrypto` for PINs, `node:crypto` AES-256-GCM for OAuth tokens) — never stored in plaintext as the current mock does.
 - **RLS:** every Supabase table is scoped to `auth.uid()` via Row-Level Security policies.
@@ -35,7 +36,7 @@ Backend is built entirely on **Next.js Route Handlers** (`app/api/**/route.ts`) 
 
 **Data model additions:**
 - `profiles(id UUID PK references auth.users, name, created_at, updated_at)`
-- `mailboxes(id, user_id FK, email, provider ENUM('gmail','outlook'), is_default, send_pin_hash NULL, lock_pin_hash NULL, created_at)` — schema only; PIN set/verify flows land in Module 10.
+- `mailboxes(id, user_id FK, email, provider ENUM('gmail','outlook'), is_default, send_pin_hash NULL, lock_pin_hash NULL, created_at)` — schema only; PIN set/verify flows land in Module 13.
 
 **Key API routes:**
 - `GET /api/user` — current user profile.
@@ -76,7 +77,7 @@ Backend is built entirely on **Next.js Route Handlers** (`app/api/**/route.ts`) 
 
 **Wires up:**
 - `src/components/compose/ComposeFooter.tsx` — `handleSend` stops calling local `buildSentEmail`/`dispatch({ type: "ADD_EMAIL" })` and instead `POST /api/mail/send`; the "Read receipt" checkbox (`ui.readReceiptDefault`) is now actually sent as `trackingEnabled` in the request body.
-- `src/components/compose/SendPinModal.tsx` — the plaintext `pin !== account.sendPin` check moves server-side (`bcrypt.compare` against `mailboxes.send_pin_hash`, returns 403 on mismatch — PIN *setting* UI itself lands in Module 10).
+- `src/components/compose/SendPinModal.tsx` — the plaintext `pin !== account.sendPin` check moves server-side (`bcrypt.compare` against `mailboxes.send_pin_hash`, returns 403 on mismatch — PIN *setting* UI itself lands in Module 13).
 - `src/components/reading-pane/EmailToolbar.tsx` — star/archive/trash switch from local `dispatch` to `PATCH /api/mail/[id]`.
 - `src/components/mail-list/MailListPane.tsx`, `EmailList.tsx`, `src/components/reading-pane/ReadingPane.tsx` — email list/detail hydrate from `GET /api/mail`/`GET /api/mail/[id]` instead of `INITIAL_EMAILS`.
 - `src/components/reading-pane/TrackingStatus.tsx` — "Opened by X of Y · Z clicked" now reflects real aggregated data.
@@ -112,61 +113,119 @@ Backend is built entirely on **Next.js Route Handlers** (`app/api/**/route.ts`) 
 
 ---
 
-## Module 5 — Provider Adapter Abstraction + Postgres-Native Job Queue
+## Module 5 — Provider Adapter Abstraction
 
-**Description:** A refactor + infrastructure module, sequenced right before inbound sync because sync needs both pieces. First, generalizes the two send paths that now exist ad hoc (Gmail from Module 2, Graph from Module 4) behind one `ProviderAdapter` interface (`sendMail`, `fetchMessages`, `fetchMessageBody`, `applyFlags`, `moveToFolder`), so later modules call one abstraction regardless of provider. Second, stands up the background job runner sync requires, since backfilling a mailbox's history cannot happen inside one Route Handler's request/response cycle.
+**Description:** Generalizes the two send paths that exist ad hoc (Gmail from Module 2, Graph from Module 4) behind one `ProviderAdapter` interface (`sendMail`, `fetchMessages`, `fetchMessageBody`, `applyFlags`, `moveToFolder`), so every later module (sync, write-back, push renewal) calls one abstraction regardless of provider, instead of branching on `mailbox.provider` everywhere.
 
-**Tech:** `pg-boss` — a Postgres-backed job queue with retries/scheduling, running against the same Supabase Postgres instance. Chosen specifically to avoid a paid/hosted Redis add-on (e.g. BullMQ+Redis).
+**Tech:** plain TypeScript interface + one implementation per provider (`src/lib/providers/gmail-adapter.ts`, `microsoft-adapter.ts`) selected via `getProviderAdapter(provider)`. No job queue, no separate worker process — every module built on this adapter runs inside a Vercel Route Handler, synchronously or deferred with `after()`.
 
-**Wires up:** no direct UI wiring — pure backend/architecture module that unblocks Module 6.
+**Wires up:** no direct UI wiring — pure backend/architecture module that unblocks Modules 6, 7, 9, and 10.
 
 **Data model additions:**
-- `sync_state(mailbox_id FK UNIQUE, provider, last_history_id NULL, last_delta_link NULL, last_synced_at, backfill_complete BOOLEAN)` — provider-specific cursor storage (Gmail `historyId`, Graph `deltaLink`) unified into one row shape.
-- `pg-boss` creates and manages its own job/schedule tables automatically.
+- `sync_state(mailbox_id FK UNIQUE, provider, last_history_id NULL, last_delta_link NULL, last_synced_at, backfill_complete BOOLEAN, push_expires_at NULL, push_subscription_id NULL)` — provider-specific cursor storage (Gmail `historyId`, Graph `deltaLink`) and the provider's push-subscription bookkeeping (Modules 9/10), unified into one row shape. `backfill_complete` doubles as the "mailbox is ready to show real mail" flag Module 6 depends on.
 
-**Key API routes:** none new (internal workers).
+**Key API routes:** none new.
 
 ---
 
-## Module 6 — Inbound Sync Engine (Backfill + Polling Incremental)
+## Module 6 — Inbound Sync: Initial Fetch on Connect
 
-**Description:** The largest single module. For each connected mailbox: (1) an initial backfill job pages through message history and normalizes every message into the `emails`/`email_recipients` schema via the Module 5 adapter; (2) an incremental sync keeps it current via **polling** — Gmail `history.list` and Graph delta queries, run on a `pg-boss` schedule every few minutes. Polling (not a paid push-broker like GCP Pub/Sub) is the required baseline; real push is an explicit enhancement in Module 15. Inbound HTML bodies are sanitized server-side before storage/render to prevent stored-XSS from arbitrary sender HTML.
+**Description:** Right after a mailbox is created (Module 2/4's OAuth callback), the mailbox needs *some* mail in it before it's useful, but pulling that inline in the callback risks Vercel's function duration limit on an account with real history, and blocks the OAuth redirect on network calls the user is just waiting on. Instead: the callback upserts `sync_state` with `backfill_complete = false` and, via `after()`, fires a request to a separate internal route that does the actual fetch after the callback has already redirected the user into the app. That route pages through the **last 10 days** of the mailbox's history (not the entire history — this product doesn't need exhaustive cross-provider search coverage for the MVP, see Module 11), normalizing and upserting each message via `processMessagePage`, sanitizing inbound HTML before storage. When it finishes, it flips `backfill_complete` to `true`. While a mailbox's `backfill_complete` is `false`, the UI shows a "Setting up your mailbox" state instead of its (empty/partial) mail list — mirroring the existing `MainPanel.tsx` pattern that already branches on `account.locked` for `LockedMailboxScreen`.
 
-**Tech:** `googleapis` (`history.list`), `@azure/msal-node` + Graph delta queries, `sanitize-html` for inbound HTML sanitization, `pg-boss` (Module 5) for backfill/poll jobs.
+**Tech:** the Module 5 adapter's `fetchMessages({ mode: "backfill", cursor })`, paginated until either "no more pages" or the 10-day window is exhausted; `sanitize-html` for inbound HTML; Next.js `after()` (`next/server`) to defer the internal route call past the OAuth callback's redirect response.
 
 **Wires up:**
-- `src/components/shell/FolderNav.tsx`/`FolderNavItem.tsx` — unread counts (`getFolderCounts`) now reflect real inbound mail.
-- `src/components/mail-list/EmailList.tsx`, `EmailListRow.tsx` — list genuinely grows as new mail arrives (via client refetch/poll — true live push is Module 15).
-- `src/components/reading-pane/EmailDetail.tsx` — **required frontend change**: currently renders `email.bodyParagraphs.map(p => <p>{p}</p>)` (plain-text paragraph model). Real inbound mail is HTML, so this component must switch to rendering sanitized `body_html` (e.g. `dangerouslySetInnerHTML` on the pre-sanitized string).
-- `src/types/index.ts` `Email` type needs `bodyHtml`/`bodyText` in place of (or alongside, for composer parity) `bodyParagraphs`.
+- `src/app/api/auth/callback/gmail/route.ts`, `.../microsoft/route.ts` — after creating the mailbox, upsert `sync_state` with `backfill_complete = false`, then `after(() => fetch(internalSyncUrl, ...))` instead of the old `enqueueBackfillJob` call.
+- `src/app/api/internal/sync/[mailboxId]/backfill/route.ts` — implementation swaps from enqueueing a job to doing the fetch-and-store work directly. Since it's now invoked server-to-server (no browser session on that request), it accepts either a valid user session (for a future manual "resync" button) or an internal shared-secret header (for the OAuth callback's own call) — the admin/service-role client, same as the webhook routes in Modules 9/10, does the actual writes.
+- `src/components/shell/MainPanel.tsx` — gains a third branch alongside `EmptyMailboxScreen`/`LockedMailboxScreen`: a new "setting up" screen, shown when the active account's `sync_state.backfill_complete` is `false`.
+- `src/components/account-switcher/AccountSwitcherPopover.tsx`/`src/components/settings/MailboxCard.tsx` — a small "setting up…" indicator next to a not-yet-ready mailbox, so it's visible outside the mail list too.
+- `GET /api/mailboxes` — now also returns each mailbox's `backfill_complete` state so the UI can branch on it.
 
 **Data model additions:**
 - `emails` gains `provider_message_id` (unique per mailbox, for idempotent upsert during sync) and `thread_id` (nullable; forward-compatible column for future threading — no threading UI exists today, none is built here).
 - `sync_state` (added in Module 5) is populated/updated here.
 
+**Superseded:** this replaces what was originally planned as a backfill *job* plus a recurring 5-minute poll *schedule* — both required a background job queue/worker process. Ongoing new-mail sync now belongs entirely to Modules 9/10 (provider push), which are activity-renewed rather than scheduled, so no queue, worker, or cron job is needed anywhere in this pipeline.
+
 **Key API routes:**
-- `POST /api/internal/sync/[mailboxId]/backfill` — enqueues the initial backfill (triggered right after Module 2/4's connect flow completes).
+- `POST /api/internal/sync/[mailboxId]/backfill` — does the initial fetch-and-store (triggered right after Module 2/4's connect flow completes; also usable later as a manual "resync" trigger).
 - `GET /api/mail` (from Module 3) now returns real synced data instead of only sent mail.
 
 ---
 
 ## Module 7 — Two-Way Mailbox Actions Sync
 
-**Description:** Today `EmailToolbar.tsx`'s star/archive/trash and read-state changes only mutate the local DB (after Module 3). This module writes those actions back to the real Gmail/Outlook mailbox so the app stays consistent with what the user sees when they check mail elsewhere — required for a mail client to feel trustworthy.
+**Description:** Today `EmailToolbar.tsx`'s star/archive/trash and read-state changes only mutate the local DB (after Module 3). This module writes those actions back to the real Gmail/Outlook mailbox so the app stays consistent with what the user sees when they check mail elsewhere — required for a mail client to feel trustworthy. The provider call runs inside the same `PATCH /api/mail/[id]` Route Handler invocation, deferred past the response with Next.js `after()`, so the local write returns immediately without waiting on the Gmail/Graph round-trip — the UI updates optimistically, exactly as it would with a background job, just without one.
 
 **Tech:** provider-specific write operations behind the Module 5 adapter — Gmail: `users.messages.modify` (label add/remove: `STARRED`, `UNREAD`; archive = remove `INBOX` label; trash = `users.messages.trash`); Graph: `PATCH /me/messages/{id}` for `isRead`/`flag`, `POST /me/messages/{id}/move` for archive/delete.
 
 **Wires up:**
-- `src/components/reading-pane/EmailToolbar.tsx` — star/archive/trash buttons' `PATCH /api/mail/[id]` calls (Module 3) now propagate to the provider, not just the local DB.
+- `src/app/api/mail/[id]/route.ts` — the write-back call is now `after(() => adapter.applyFlags(...) / adapter.moveToFolder(...))`, calling the Module 5 adapter directly instead of enqueueing a job.
+- `src/components/reading-pane/EmailToolbar.tsx` — star/archive/trash buttons' `PATCH /api/mail/[id]` calls (Module 3), unchanged from the caller's perspective.
 - `src/components/mail-list/EmailListRow.tsx` — star toggle, same propagation.
 
 **Data model additions:** none new; `emails.provider_message_id` (Module 6) makes the write-back addressable.
 
-**Key API routes:** `PATCH /api/mail/[id]` (extended) — performs the local write and enqueues (via `pg-boss`) a provider write-back job, so the UI updates optimistically without blocking on the round-trip to Gmail/Graph.
+**Key API routes:** `PATCH /api/mail/[id]` (extended) — performs the local write and defers the provider write-back via `after()`, so the UI updates optimistically without blocking on the round-trip to Gmail/Graph.
 
 ---
 
-## Module 8 — Server-Side Cross-Account Search
+## Module 8 — Live Client Updates via Supabase Realtime
+
+**Why before the provider push modules:** Modules 9/10 write new mail into Postgres from a server-side webhook with no browser involved at all — something has to tell the open app to actually show it, and this is that something. It's also what makes Module 6's "Setting up your mailbox" screen flip to the real mail list the instant the initial fetch finishes, instead of waiting on a client poll.
+
+**Description:** Replaces `useMailSync`'s 30-second polling loop with a live Postgres change-feed. The frontend subscribes to `INSERT`/`UPDATE` events on `emails` (and `sync_state`, for the Module 6 ready-flip) scoped to the user's own mailboxes via Supabase Realtime's RLS-aware channels, and refetches/merges the moment a change lands — no separate "signal" endpoint needed, since the database write itself *is* the signal.
+
+**Tech:** Supabase Realtime (`@supabase/supabase-js` realtime client, already a dependency) — Postgres logical replication over a websocket, part of the same Supabase project/plan, no separate infra.
+
+**Wires up:**
+- `src/hooks/useMailSync.ts` — the `setInterval` poll is replaced with a Realtime channel subscription per active mailbox; initial load (`fetchAccountEmails`) is unchanged, it's only the "stay current" half that changes transport.
+- `src/components/shell/MainPanel.tsx` (Module 6) — the "setting up" screen listens for its mailbox's `sync_state` row flipping `backfill_complete: true` and swaps to the normal mail view live, instead of waiting for the next poll.
+- `src/components/reading-pane/TrackingStatus.tsx` — open/click counts (Module 3) can ride the same channel for a live-updating dot, since it's the same mechanism, not additional scope.
+
+**Data model additions:** none new; requires enabling Realtime replication on the `emails` and `sync_state` tables (a Supabase project setting, not a migration).
+
+**Key API routes:** none — this is a client-to-Supabase channel, not a Next.js route.
+
+---
+
+## Module 9 — Gmail Push Sync (Pub/Sub Watch)
+
+**Description:** Replaces polling with Gmail telling us the moment a mailbox changes. Right after Module 6's initial fetch completes (and again whenever renewed), the mailbox is registered via `users.watch()` against a Google Cloud Pub/Sub topic; Gmail then publishes a notification to that topic on every change, Pub/Sub delivers it as an HTTP POST to our webhook, and the webhook does the same incremental fetch Module 6's poll-mode adapter call already knows how to do — just triggered by a push instead of a timer. Because it's registered per mailbox and expires (~7 days), renewal is triggered by user activity rather than a schedule: when the user switches to a mailbox in the UI, the app checks that mailbox's `push_expires_at`, and if it's within the next 12 hours, calls `users.watch()` again to extend it. If the subscription is found already expired and re-registering fails because the stored refresh token is no longer valid, the UI shows a blurred-background "reconnect this mailbox" dialog rather than silently failing.
+
+**Tech:** `googleapis` `users.watch()`/`users.stop()`; a Google Cloud Pub/Sub topic with the Gmail push service account (`gmail-api-push@system.gserviceaccount.com`) granted publish access, and a push subscription on that topic targeting our webhook — both free-tier at this scale. Webhook authenticity verified via the Pub/Sub push subscription's OIDC token.
+
+**Wires up:**
+- Wherever `activeAccountId` changes (`src/components/account-switcher/`) — switching to a Gmail mailbox triggers a lightweight `POST /api/mailboxes/[id]/ensure-fresh` call (shared with Module 10; branches on `provider` internally).
+- A new "reconnect this mailbox" modal (no current component covers this) — blurred background, mirrors `LockedMailboxScreen`'s full-panel takeover pattern, triggered when renewal reports the mailbox's grant is dead.
+
+**Data model additions:** none beyond Module 5's `sync_state.push_expires_at` (Gmail's watch state is mailbox-scoped, not subscription-scoped, so `push_subscription_id` is unused here — it's populated by Module 10 only).
+
+**Key API routes:**
+- `POST /api/webhooks/gmail` — public, verifies the Pub/Sub OIDC token, looks up the mailbox by the notification's `emailAddress`, runs the same `fetchMessages({ mode: "poll" })` path Module 6 already implements, checkpoints `sync_state`.
+- `POST /api/mailboxes/[id]/ensure-fresh` — shared with Module 10; for a Gmail mailbox, renews via `users.watch()` if `push_expires_at` is within 12h, or reports `needs_reconnect` if the refresh token is dead.
+
+---
+
+## Module 10 — Outlook Push Sync (Graph Subscriptions)
+
+**Description:** The same push upgrade as Module 9, for Outlook. A Microsoft Graph subscription (`resource: /me/messages`, `changeType: created`) is created pointing at our webhook; unlike Gmail, this needs no separate broker (Graph posts directly), but it also expires much sooner (~3 days max) and requires a validation handshake at creation time (Graph calls the webhook URL with a `validationToken` that must be echoed back as plain text within 10 seconds). Renewal follows the identical activity-triggered pattern from Module 9: checked on mailbox switch, renewed if `push_expires_at` is within 12h, reconnect-prompted if the grant is dead.
+
+**Tech:** Microsoft Graph `/subscriptions` REST endpoint (create/`PATCH`/delete); a `clientState` secret stored alongside the subscription and verified on every incoming notification, since Graph (unlike Pub/Sub) has no built-in request-signing.
+
+**Wires up:**
+- Same `POST /api/mailboxes/[id]/ensure-fresh` route as Module 9, Outlook branch.
+- Same reconnect-modal component as Module 9 (provider-agnostic once built).
+
+**Data model additions:** none beyond Module 5's `sync_state.push_expires_at`/`push_subscription_id` (both used here — Graph subscriptions are addressed by id for renewal/deletion, unlike Gmail's mailbox-scoped watch).
+
+**Key API routes:**
+- `POST /api/webhooks/microsoft` — public; handles the `validationToken` handshake on subscription creation, verifies `clientState` on real notifications, looks up the mailbox by `subscriptionId`, runs the adapter's `fetchMessages({ mode: "poll" })` path, checkpoints `sync_state`.
+- `POST /api/mailboxes/[id]/ensure-fresh` — Outlook branch: `PATCH /subscriptions/{id}` with a new `expirationDateTime` if renewing, or reports `needs_reconnect`.
+
+---
+
+## Module 11 — Server-Side Cross-Account Search
 
 **Description:** Replaces `getVisibleEmails`'s client-side substring match (`src/lib/utils.ts`, scoped to the single active account+folder) with real server-side search across **all** of the user's connected mailboxes at once — closing the explicitly-noted gap that today's search never searches cross-account.
 
@@ -182,7 +241,7 @@ Backend is built entirely on **Next.js Route Handlers** (`app/api/**/route.ts`) 
 
 ---
 
-## Module 9 — Drafts Autosave
+## Module 12 — Drafts Autosave
 
 **Description:** The `drafts` folder exists as an enum value and mock seed (`e7` in `INITIAL_EMAILS`) but nothing auto-saves drafts today. This module periodically persists in-progress compose state and lets a draft be reopened for editing.
 
@@ -198,7 +257,7 @@ Backend is built entirely on **Next.js Route Handlers** (`app/api/**/route.ts`) 
 
 ---
 
-## Module 10 — Mailbox Security: Send PIN & Lock PIN Persistence
+## Module 13 — Mailbox Security: Send PIN & Lock PIN Persistence
 
 **Description:** Makes the per-mailbox Send PIN and Lock PIN features (unique to this app) real and hashed, replacing the plaintext `sendPin`/`lockPin` strings in the mock. Also fixes a real design gap in the current mock: `Mailbox.locked` is a persistent boolean, meaning once unlocked it would stay unlocked forever. This module deliberately makes "unlocked" **session-scoped** (a JWT claim or a `session_unlocks` table), not a DB column, so a mailbox re-locks on every new login — matching what the mock's locked-Hotmail-by-default entry implies.
 
@@ -215,7 +274,7 @@ Backend is built entirely on **Next.js Route Handlers** (`app/api/**/route.ts`) 
 
 ---
 
-## Module 11 — Settings & Account Persistence
+## Module 14 — Settings & Account Persistence
 
 **Description:** Makes the Account and Security settings tabs actually persist, closing two explicitly-noted gaps: `AccountTab.tsx`'s name/email edit is local-only, and `SecurityTab.tsx`'s password change doesn't touch anything real.
 
@@ -231,7 +290,7 @@ Backend is built entirely on **Next.js Route Handlers** (`app/api/**/route.ts`) 
 
 ---
 
-## Module 12 — Attachments
+## Module 15 — Attachments
 
 **Description:** Adds attachment support end to end: outbound compose attachments, inbound attachment display/download. Currently there is no attachment field anywhere in `Email`/`EmailCta` and no UI for it, so this is new surface area, not a wiring fix. Required for a "fully working" email client, but nothing else in the app depends on it, so it trails the core send/sync/tracking loop and the UI-parity fixes above.
 
@@ -241,7 +300,7 @@ Backend is built entirely on **Next.js Route Handlers** (`app/api/**/route.ts`) 
 - `src/components/compose/ComposeFields.tsx`/a new `ComposeAttachments.tsx` — new file upload UI (doesn't exist today).
 - `src/components/reading-pane/EmailDetail.tsx` — new attachment-chip list rendering.
 - Module 3's `POST /api/mail/send` — extended to attach files via Gmail raw MIME parts / Graph `attachments` array.
-- Module 6's sync engine — extended to pull attachment parts during backfill/incremental sync (Gmail `payload.parts`, Graph `/attachments`).
+- Module 6's initial-fetch and Modules 9/10's push-sync webhooks — extended to pull attachment parts whenever a message is fetched (Gmail `payload.parts`, Graph `/attachments`).
 
 **Data model additions:** `attachments(id, email_id FK, filename, mime_type, size_bytes, storage_key, created_at)`.
 
@@ -249,7 +308,7 @@ Backend is built entirely on **Next.js Route Handlers** (`app/api/**/route.ts`) 
 
 ---
 
-## Module 13 — Contacts / Address Book *(stretch)*
+## Module 16 — Contacts / Address Book *(stretch)*
 
 **Description:** Today `parseAddressList` (`src/lib/utils.ts`) naively derives a display name from the local-part of whatever's typed — there's no address book, no autocomplete, no contact history. This module adds one, derived automatically from synced/sent mail plus manual entry. The product is fully functional without it; this is a convenience layer over an already-working naive parser.
 
@@ -260,37 +319,21 @@ Backend is built entirely on **Next.js Route Handlers** (`app/api/**/route.ts`) 
 
 **Data model additions:** `contacts(id, user_id FK, name, email, last_used_at, use_count)`.
 
-**Key API routes:** `GET /api/contacts?q=`, `POST /api/contacts`. A background job (Module 5's `pg-boss`) upserts contacts from `email_recipients`/sent mail after each sync/send.
+**Key API routes:** `GET /api/contacts?q=`, `POST /api/contacts`. Contacts are upserted from `email_recipients`/sent mail inline via `after()` after each sync/send/webhook fetch — not a background job queue (there isn't one; see cross-cutting constraints).
 
 ---
 
-## Module 14 — Notifications *(stretch)*
+## Module 17 — Notifications *(stretch)*
 
-**Description:** No notification system exists today. Adds in-app and browser-level notification of new mail. The polling baseline (unread counts already computed in Module 6) is sufficient for correctness; this module is a pure UX enhancement.
+**Description:** No notification system exists today. Adds in-app and browser-level notification of new mail. The baseline is already covered by Module 8's Realtime channel; this module is a pure UX enhancement on top of it.
 
-**Tech:** baseline: polling `GET /api/mail/unread-count`; enhancement: Web Push (`web-push` npm package, VAPID keys — free, no paid push service) for OS-level notifications when the tab isn't focused.
+**Tech:** baseline: react to the same Supabase Realtime channel Module 8 already subscribes to; enhancement: Web Push (`web-push` npm package, VAPID keys — free, no paid push service) for OS-level notifications when the tab isn't focused.
 
-**Wires up:** `src/components/shell/Sidebar.tsx`/`FolderNav.tsx` badges (already show unread counts, but from local state — this makes them live), plus a new toast/notification affordance (no current component covers this).
+**Wires up:** `src/components/shell/Sidebar.tsx`/`FolderNav.tsx` badges (already show unread counts, but from local state — Module 8 makes them live), plus a new toast/notification affordance (no current component covers this).
 
 **Data model additions:** `push_subscriptions(id, user_id FK, endpoint, keys_json)` if Web Push is implemented.
 
-**Key API routes:** `GET /api/mail/unread-count`, `POST /api/push/subscribe`.
-
----
-
-## Module 15 — Real-Time Push Enhancements *(stretch)*
-
-**Description:** An explicit enhancement layer over the polling-based baseline shipped in Modules 6/14 — the product is already complete and correct without it. Two upgrades:
-1. **Client delivery:** replaces client polling with **Supabase Realtime** (Postgres change-feed over websockets, built into the platform's free tier — no separate SSE/WebSocket infra to build or pay for) so newly synced mail and tracking events (opens/clicks) appear in the UI within seconds.
-2. **Sync freshness:** upgrades Module 6's polling to real push — Gmail `watch()` (requires a Cloud Pub/Sub topic, free-tier eligible) and Microsoft Graph change-notification subscriptions (native webhooks, no broker needed, but expire ~3 days and must be renewed via a recurring `pg-boss` job).
-
-**Tech:** Supabase Realtime (`@supabase/supabase-js` realtime client); `googleapis` `watch()` + Pub/Sub push endpoint; Graph subscriptions webhook.
-
-**Wires up:** `src/components/reading-pane/TrackingStatus.tsx` (live-updating open/click dot instead of poll-refreshed), `FolderNav.tsx` (live unread counts), `EmailList.tsx` (new mail appears without refresh).
-
-**Data model additions:** none new.
-
-**Key API routes:** `POST /api/webhooks/gmail`, `POST /api/webhooks/microsoft`.
+**Key API routes:** `POST /api/push/subscribe`.
 
 ---
 
@@ -302,24 +345,25 @@ The order above optimizes for **fastest path to a working product with the core 
 2. **Module 2 (Gmail connect + send)** — the fastest way to get one real, working mailbox, scoped to a single provider to keep it fast.
 3. **Module 3 (tracking pixel/click engine) comes before a second provider** — this is the single highest-value module in the product, and it's provider-agnostic once one mailbox exists. Shipping it third proves the core value prop end-to-end before investing in provider breadth or the largest remaining effort (inbound sync).
 4. **Module 4 (Outlook/Graph connect + send)** — extends the proven send+tracking path to the second provider in scope.
-5. **Module 5 (adapter abstraction + Postgres job queue)** is placed right before sync because by this point two ad hoc send paths exist and need consolidating, and because inbound sync is impossible to do correctly in a request/response cycle — the queue is a hard prerequisite for Module 6, not a nice-to-have.
-6. **Module 6 (inbound sync engine)** is the single largest module, which is exactly why it's sequenced after the send/tracking loop already works — it can take the longest without blocking demonstrable value. Polling (not a paid push broker) is the required baseline.
-7. **Module 7 (two-way action sync)** follows sync because messages need to exist locally (Module 6) before their star/archive/trash state can be meaningfully written back.
-8. **Modules 8–11 (search, drafts, PIN persistence, settings persistence)** are UI-parity fixes for gaps explicitly present in the current codebase (no cross-account search, no draft autosave, plaintext PINs, dead password-change form). None of them block another module, so they're grouped together.
-9. **Module 12 (attachments)** is real, required product functionality but nothing else depends on it, so it's placed after the UI-parity fixes despite being more work than any single module in the 8–11 group.
-10. **Modules 13–15 (contacts, notifications, real-time push)** are last because the product is fully functional without them — genuine enhancements over an already-complete, polling-based, address-book-free baseline.
+5. **Module 5 (adapter abstraction)** is placed right before sync because by this point two ad hoc send paths exist and need consolidating — no job queue this time, since nothing in the new design needs one.
+6. **Module 6 (initial fetch on connect)** replaces what would otherwise be a background backfill job with a synchronous-but-deferred fetch, bounded to 10 days of history, so it can't blow past Vercel's function duration limit and doesn't need a queue to stay off the OAuth redirect's critical path.
+7. **Module 7 (two-way action sync)** follows because messages need to exist locally (Module 6) before their star/archive/trash state can be meaningfully written back; `after()` replaces the queue here too.
+8. **Module 8 (Realtime client updates)** comes right after, since Modules 9/10's whole value — "instant" — depends on the browser actually finding out when the push modules write new mail server-side.
+9. **Modules 9–10 (Gmail Pub/Sub, Outlook Graph subscriptions)** are the required replacement for polling, split one-per-provider since the setup/renewal mechanics are entirely provider-specific (Pub/Sub topic vs. Graph subscription + validation handshake).
+10. **Modules 11–14 (search, drafts, PIN persistence, settings persistence)** are UI-parity fixes for gaps explicitly present in the current codebase (no cross-account search, no draft autosave, plaintext PINs, dead password-change form). None of them block another module, so they're grouped together.
+11. **Module 15 (attachments)** is real, required product functionality but nothing else depends on it, so it's placed after the UI-parity fixes despite being more work than any single module in the 11–14 group.
+12. **Modules 16–17 (contacts, notifications)** are last because the product is fully functional without them — genuine enhancements over an already-complete baseline.
 
 ---
 
 # Required vs. Stretch
 
-**Required for "fully working product":** Modules 1–12 — auth, real mailbox connect for both provider families in scope, real send, the tracking-pixel/click differentiator, inbound sync, two-way action sync, search, drafts, PIN security, settings persistence, attachments.
+**Required for "fully working product":** Modules 1–15 — auth, real mailbox connect for both provider families in scope, real send, the tracking-pixel/click differentiator, initial inbound sync, provider push sync for both providers with activity-triggered renewal, live client updates, two-way action sync, search, drafts, PIN security, settings persistence, attachments.
 
 **Stretch / nice-to-have — product is complete without them:**
-- **Module 13 (Contacts/address book)** — today's `parseAddressList` naive local-part derivation is functional, if unpolished; an address book is a convenience layer.
-- **Module 14 (Notifications)** — polling-refreshed unread counts (already part of Module 6/8's baseline) are sufficient for correctness; push notifications are a UX enhancement.
-- **Module 15 (Real-time push)** — SSE/websocket delivery and webhook-driven Gmail/Graph push over the polling fallback are upgrades over an already-correct baseline, not requirements.
-- Within Module 8 (search), the cross-account result disambiguation UI (showing which mailbox/folder a result belongs to) is flagged inline as net-new UI, not just a backend wiring change — small effort, but worth calling out.
+- **Module 16 (Contacts/address book)** — today's `parseAddressList` naive local-part derivation is functional, if unpolished; an address book is a convenience layer.
+- **Module 17 (Notifications)** — Module 8's live unread counts are already sufficient for correctness; push notifications are a UX enhancement on top.
+- Within Module 11 (search), the cross-account result disambiguation UI (showing which mailbox/folder a result belongs to) is flagged inline as net-new UI, not just a backend wiring change — small effort, but worth calling out.
 - **Conversation threading** is intentionally excluded from the module list — there's no `thread_id`-driven grouped UI anywhere in the current component tree, `Reply` in `EmailToolbar.tsx` only prefills a fresh compose draft with no reference to the original message, and it wasn't requested. `emails.thread_id` is included in Module 6's schema only as a forward-compatible column, so this remains an easy true stretch add later.
 - **iCloud/generic IMAP and Hotmail-specific work** are natural extensions of Modules 2/4's patterns (Hotmail is already a Microsoft account under Graph) but are explicitly deferred — out of scope for the current provider set (Gmail + Outlook only).
 
@@ -333,3 +377,6 @@ The order above optimizes for **fastest path to a working product with the core 
 - `src/types/index.ts`
 - `src/components/compose/ComposeFooter.tsx`
 - `src/app/(app)/mail/layout.tsx`
+- `src/lib/providers/types.ts`
+- `src/hooks/useMailSync.ts`
+- `src/lib/sync/sync-state.ts`
