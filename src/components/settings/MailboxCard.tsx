@@ -51,7 +51,6 @@ export function MailboxCard({ account }: MailboxCardProps) {
           </p>
           <p className="font-mono text-[10px] uppercase tracking-mono-label text-ink-faint">
             {account.provider}
-            {account.backfillComplete === false && " · Setting up…"}
           </p>
         </div>
         <InlineStatus

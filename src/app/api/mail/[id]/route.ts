@@ -1,11 +1,9 @@
-import { NextRequest, NextResponse, after } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
 import { getProviderAdapter, ProviderMethodNotImplementedError } from "@/lib/providers";
 import { MAIL_SELECT, shapeEmail, type EmailRow } from "@/lib/mail/shape";
-
-const paramsSchema = z.object({ id: z.string().uuid() });
+import { isUuidEmailId, parseLiveEmailId, shapeLiveEmailDetail } from "@/lib/mail/live-shape";
 
 const patchBodySchema = z
   .object({
@@ -20,10 +18,6 @@ export async function GET(
   { params }: RouteContext<"/api/mail/[id]">
 ) {
   const { id } = await params;
-  const parsedParams = paramsSchema.safeParse({ id });
-  if (!parsedParams.success) {
-    return NextResponse.json({ error: "Invalid email id" }, { status: 400 });
-  }
 
   const supabase = await createClient();
   const {
@@ -34,10 +28,40 @@ export async function GET(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const live = parseLiveEmailId(id);
+  if (live) {
+    const { data: mailbox } = await supabase
+      .from("mailboxes")
+      .select("provider")
+      .eq("id", live.mailboxId)
+      .maybeSingle<{ provider: string }>();
+    if (!mailbox) {
+      return NextResponse.json({ error: "Mailbox not found" }, { status: 404 });
+    }
+
+    try {
+      const adapter = getProviderAdapter(mailbox.provider);
+      const body = await adapter.fetchMessageBody(supabase, {
+        mailboxId: live.mailboxId,
+        providerMessageId: live.providerMessageId,
+      });
+      return NextResponse.json(
+        shapeLiveEmailDetail(live.mailboxId, live.folder, live.providerMessageId, body)
+      );
+    } catch (err) {
+      console.error("GET /api/mail/[id] (live) failed", err);
+      return NextResponse.json({ error: "Failed to load email" }, { status: 502 });
+    }
+  }
+
+  if (!isUuidEmailId(id)) {
+    return NextResponse.json({ error: "Invalid email id" }, { status: 400 });
+  }
+
   const { data, error } = await supabase
     .from("emails")
     .select(MAIL_SELECT)
-    .eq("id", parsedParams.data.id)
+    .eq("id", id)
     .single();
 
   if (error || !data) {
@@ -52,10 +76,6 @@ export async function PATCH(
   { params }: RouteContext<"/api/mail/[id]">
 ) {
   const { id } = await params;
-  const parsedParams = paramsSchema.safeParse({ id });
-  if (!parsedParams.success) {
-    return NextResponse.json({ error: "Invalid email id" }, { status: 400 });
-  }
 
   const json = await request.json().catch(() => null);
   const parsedBody = patchBodySchema.safeParse(json);
@@ -72,10 +92,56 @@ export async function PATCH(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const live = parseLiveEmailId(id);
+  if (live) {
+    const { data: mailbox } = await supabase
+      .from("mailboxes")
+      .select("provider")
+      .eq("id", live.mailboxId)
+      .maybeSingle<{ provider: string }>();
+    if (!mailbox) {
+      return NextResponse.json({ error: "Mailbox not found" }, { status: 404 });
+    }
+
+    // No local row to update -- there's nothing to return early with, so this is a direct,
+    // awaited provider write rather than a deferred `after()` one. The frontend has already
+    // applied the change optimistically; this call is just the real write + confirmation.
+    const adapter = getProviderAdapter(mailbox.provider);
+    const patch = parsedBody.data;
+    try {
+      if (patch.starred !== undefined || patch.unread !== undefined) {
+        await adapter.applyFlags(supabase, {
+          mailboxId: live.mailboxId,
+          providerMessageId: live.providerMessageId,
+          flags: { starred: patch.starred, unread: patch.unread },
+        });
+      }
+      if (patch.folder !== undefined) {
+        await adapter.moveToFolder(supabase, {
+          mailboxId: live.mailboxId,
+          providerMessageId: live.providerMessageId,
+          folder: patch.folder,
+        });
+      }
+    } catch (err) {
+      if (err instanceof ProviderMethodNotImplementedError) {
+        return NextResponse.json({ error: err.message }, { status: 501 });
+      }
+      console.error("PATCH /api/mail/[id] (live) failed", err);
+      return NextResponse.json({ error: "Failed to update email" }, { status: 502 });
+    }
+
+    return NextResponse.json({ ok: true });
+  }
+
+  if (!isUuidEmailId(id)) {
+    return NextResponse.json({ error: "Invalid email id" }, { status: 400 });
+  }
+
   const { data, error } = await supabase
     .from("emails")
     .update(parsedBody.data)
-    .eq("id", parsedParams.data.id)
+    .eq("id", id)
     .select(MAIL_SELECT)
     .single();
 
@@ -83,45 +149,5 @@ export async function PATCH(
     return NextResponse.json({ error: "Email not found" }, { status: 404 });
   }
 
-  const row = data as unknown as EmailRow;
-
-  // Sent mail has no provider_message_id (Module 3's send path doesn't persist the Gmail/Graph
-  // message id it gets back), so there's nothing addressable to write back to for those rows.
-  if (row.provider_message_id) {
-    const mailboxId = row.mailbox_id;
-    const providerMessageId = row.provider_message_id;
-    const patch = parsedBody.data;
-
-    after(async () => {
-      const admin = createAdminClient();
-      const { data: mailbox } = await admin
-        .from("mailboxes")
-        .select("provider")
-        .eq("id", mailboxId)
-        .maybeSingle<{ provider: "gmail" | "outlook" }>();
-      if (!mailbox) return; // mailbox was disconnected/deleted since this PATCH was issued
-
-      const adapter = getProviderAdapter(mailbox.provider);
-      try {
-        if (patch.starred !== undefined || patch.unread !== undefined) {
-          await adapter.applyFlags(admin, {
-            mailboxId,
-            providerMessageId,
-            flags: { starred: patch.starred, unread: patch.unread },
-          });
-        }
-        if (patch.folder !== undefined) {
-          await adapter.moveToFolder(admin, { mailboxId, providerMessageId, folder: patch.folder });
-        }
-      } catch (err) {
-        if (err instanceof ProviderMethodNotImplementedError) {
-          console.warn(`mail write-back: skipping unsupported action -- ${err.message}`);
-          return;
-        }
-        console.error("Deferred mail write-back failed", err);
-      }
-    });
-  }
-
-  return NextResponse.json(shapeEmail(row));
+  return NextResponse.json(shapeEmail(data as unknown as EmailRow));
 }

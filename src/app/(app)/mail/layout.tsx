@@ -7,7 +7,6 @@ import { MainPanel } from "@/components/shell/MainPanel";
 import { ComposeDrawer } from "@/components/compose/ComposeDrawer";
 import { SettingsModal } from "@/components/settings/SettingsModal";
 import { MailboxConnectStatusHandler } from "@/components/settings/MailboxConnectStatusHandler";
-import { BackfillStatusListener } from "@/components/shell/BackfillStatusListener";
 import { MAILBOX_SELECT, shapeMailbox, type MailboxRow } from "@/lib/mailboxes/shape";
 import type { Mailbox, User } from "@/types";
 
@@ -58,7 +57,6 @@ export default async function MailLayout({
       <Suspense fallback={null}>
         <MailboxConnectStatusHandler />
       </Suspense>
-      <BackfillStatusListener />
     </AppStateProvider>
   );
 }

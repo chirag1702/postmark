@@ -33,7 +33,6 @@ export type MailAction =
   | { type: "ADD_EMAIL"; email: Email }
   | { type: "ADD_ACCOUNT"; account: Mailbox }
   | { type: "SET_ACCOUNTS"; accounts: Mailbox[] }
-  | { type: "SET_ACCOUNT_BACKFILL_COMPLETE"; accountId: string; backfillComplete: boolean }
   | { type: "UNLINK_ACCOUNT"; accountId: string }
   | { type: "SET_ACCOUNT_LOCK_PIN"; accountId: string; pin: string | null }
   | { type: "SET_ACCOUNT_SEND_PIN"; accountId: string; pin: string | null }
@@ -92,20 +91,6 @@ function mailReducer(state: MailState, action: MailAction): MailState {
           action.accounts[0]?.id ??
           "");
       return { ...state, accounts: action.accounts, activeAccountId };
-    }
-    case "SET_ACCOUNT_BACKFILL_COMPLETE": {
-      const account = state.accounts.find((a) => a.id === action.accountId);
-      if (!account || account.backfillComplete === action.backfillComplete) {
-        return state;
-      }
-      return {
-        ...state,
-        accounts: state.accounts.map((a) =>
-          a.id === action.accountId
-            ? { ...a, backfillComplete: action.backfillComplete }
-            : a
-        ),
-      };
     }
     case "UNLINK_ACCOUNT": {
       const remaining = state.accounts.filter(

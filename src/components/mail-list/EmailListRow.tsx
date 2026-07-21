@@ -2,7 +2,6 @@
 
 import clsx from "clsx";
 import { Star } from "lucide-react";
-import { Badge } from "@/components/ui/Badge";
 import { Dot } from "@/components/ui/Dot";
 import { useAppState } from "@/context/app-state-context";
 import { trackingSummary } from "@/lib/utils";
@@ -13,10 +12,9 @@ interface EmailListRowProps {
   email: Email;
   selected: boolean;
   onClick: () => void;
-  sourceBadge?: { mailboxLabel: string; folderLabel: string };
 }
 
-export function EmailListRow({ email, selected, onClick, sourceBadge }: EmailListRowProps) {
+export function EmailListRow({ email, selected, onClick }: EmailListRowProps) {
   const { ui } = useAppState();
   const isSent = email.folderId === "sent";
   const counterpart = isSent
@@ -51,11 +49,6 @@ export function EmailListRow({ email, selected, onClick, sourceBadge }: EmailLis
         >
           {isSent ? `To: ${counterpart}` : counterpart}
         </span>
-        {sourceBadge && (
-          <Badge className="shrink-0">
-            {sourceBadge.mailboxLabel} · {sourceBadge.folderLabel}
-          </Badge>
-        )}
         <span className="shrink-0 font-mono text-[10.5px] text-ink-faint">
           {email.timestamp}
         </span>

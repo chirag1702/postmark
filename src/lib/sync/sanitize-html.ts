@@ -1,9 +1,9 @@
 import sanitizeHtml from "sanitize-html";
 
 /**
- * Sanitizes arbitrary inbound sender HTML before it's ever stored/rendered -- the stored-XSS
- * defense MODULES.md's Module 6 requires. Called exactly once, in `normalize.ts`, right before
- * the DB write; `EmailDetail.tsx` trusts the stored `body_html` and never re-sanitizes.
+ * Sanitizes arbitrary inbound sender HTML before it's ever rendered -- the stored-XSS defense
+ * this app requires. Called in `src/lib/mail/live-shape.ts` right before an email is handed to
+ * the frontend; `EmailDetail.tsx` trusts the shaped `bodyHtml` and never re-sanitizes.
  */
 export function sanitizeInboundHtml(html: string): string {
   return sanitizeHtml(html, {

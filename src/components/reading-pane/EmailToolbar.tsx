@@ -10,14 +10,18 @@ interface EmailToolbarProps {
   email: Email;
 }
 
+/** Returns the full updated `Email` for sent-mail (Postgres-backed) rows; for live (provider)
+ * mail there's no local row to echo back, so the route just confirms `{ ok: true }` and the
+ * caller relies on its own optimistic update instead. */
 async function patchEmail(id: string, patch: Record<string, unknown>): Promise<Email | null> {
-  const res = await fetch(`/api/mail/${id}`, {
+  const res = await fetch(`/api/mail/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
   });
   if (!res.ok) return null;
-  return res.json();
+  const data = await res.json();
+  return "id" in data ? (data as Email) : null;
 }
 
 export function EmailToolbar({ email }: EmailToolbarProps) {
@@ -40,18 +44,19 @@ export function EmailToolbar({ email }: EmailToolbarProps) {
   };
 
   const handleToggleStar = async () => {
-    const updated = await patchEmail(email.id, { starred: !email.starred });
+    const optimistic = { ...email, starred: !email.starred };
+    dispatch({ type: "UPDATE_EMAIL", email: optimistic });
+    const updated = await patchEmail(email.id, { starred: optimistic.starred });
     if (updated) dispatch({ type: "UPDATE_EMAIL", email: updated });
   };
 
   const handleMoveToFolder = async (folderId: FolderId) => {
+    // EmailToolbar is only ever rendered for the currently selected email -- moving it out
+    // of the active folder should close the reading pane, matching the prior local-only behavior.
+    dispatch({ type: "UPDATE_EMAIL", email: { ...email, folderId } });
+    dispatch({ type: "SELECT_EMAIL", emailId: null });
     const updated = await patchEmail(email.id, { folder: folderId });
-    if (updated) {
-      dispatch({ type: "UPDATE_EMAIL", email: updated });
-      // EmailToolbar is only ever rendered for the currently selected email -- moving it out
-      // of the active folder should close the reading pane, matching the prior local-only behavior.
-      dispatch({ type: "SELECT_EMAIL", emailId: null });
-    }
+    if (updated) dispatch({ type: "UPDATE_EMAIL", email: updated });
   };
 
   return (

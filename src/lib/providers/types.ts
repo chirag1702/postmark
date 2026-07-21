@@ -22,21 +22,26 @@ export interface SendMailResult {
   threadId: string | null;
 }
 
-export interface FetchMessagesParams {
+export interface ListMessagesParams {
   mailboxId: string;
-  /** "backfill" pages through full history; "poll" fetches only what changed since `cursor`. */
-  mode: "backfill" | "poll";
-  /** Opaque, provider-defined. Omit/null only on a mailbox's very first backfill call. */
-  cursor?: string | null;
+  /** Which mailbox folder to list -- always fetched fresh, bounded to a recent window; nothing
+   * is persisted, so there's no cursor/resume concept. */
+  folder: SyncableFolderId;
 }
 
-export interface FetchMessagesResult {
-  messages: { providerMessageId: string; threadId?: string | null; folder?: SyncableFolderId }[];
-  /** Persist to `sync_state` after EVERY call (both modes), not just when `hasMore` goes false --
-   * this is what lets a crashed backfill resume without redoing already-processed pages. */
-  nextCursor: string | null;
-  /** true => caller must call fetchMessages again with `nextCursor` before this run is done. */
-  hasMore: boolean;
+export interface EmailListItem {
+  providerMessageId: string;
+  threadId: string | null;
+  subject: string;
+  from: { name: string; email: string };
+  previewText: string;
+  sentAt: string;
+  unread: boolean;
+  starred: boolean;
+}
+
+export interface ListMessagesResult {
+  messages: EmailListItem[];
 }
 
 export interface FetchMessageBodyParams {
@@ -52,9 +57,9 @@ export interface FetchMessageBodyResult {
   bodyHtml: string;
   bodyText: string;
   sentAt: string;
-  /** Populated only by providers that can't determine folder during fetchMessages (Gmail --
-   * comes for free off the same `messages.get` call this body fetch already makes). Providers
-   * that resolve folder during fetchMessages (Graph) leave this undefined. */
+  /** Populated only by providers that can't determine folder any other way (Gmail -- comes for
+   * free off the same `messages.get` call this body fetch already makes). Providers whose caller
+   * already knows the folder (Graph -- encoded in the live email id) leave this undefined. */
   folder?: SyncableFolderId;
   unread: boolean;
   starred: boolean;
@@ -73,17 +78,16 @@ export interface MoveToFolderParams {
 }
 
 /**
- * One abstraction over "the connected mailbox provider" so callers (send route today, sync/
- * write-back jobs in later modules) don't need provider-specific branches. `fetchMessages`,
- * `fetchMessageBody`, `applyFlags`, and `moveToFolder` are declared now so the interface shape
- * is stable, but aren't implemented until Modules 6/7 actually need them.
+ * One abstraction over "the connected mailbox provider" so callers don't need provider-specific
+ * branches. `listMessages`/`fetchMessageBody` are always live, uncached provider calls -- nothing
+ * they return is ever persisted.
  */
 export interface ProviderAdapter {
   sendMail(supabase: SupabaseClient, params: SendMailParams): Promise<SendMailResult>;
-  fetchMessages(
+  listMessages(
     supabase: SupabaseClient,
-    params: FetchMessagesParams
-  ): Promise<FetchMessagesResult>;
+    params: ListMessagesParams
+  ): Promise<ListMessagesResult>;
   fetchMessageBody(
     supabase: SupabaseClient,
     params: FetchMessageBodyParams

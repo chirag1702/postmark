@@ -1,7 +1,6 @@
-import { NextRequest, NextResponse, after } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
 import {
   exchangeCodeForTokens,
   fetchMicrosoftUserEmail,
@@ -70,31 +69,6 @@ export async function GET(request: NextRequest) {
       const reason = rpcError?.code === "23505" ? "already_linked" : "unknown";
       return redirectWithReason(request, reason);
     }
-
-    const admin = createAdminClient();
-    const { error: syncStateError } = await admin
-      .from("sync_state")
-      .upsert(
-        { mailbox_id: mailbox.id, provider: "outlook", backfill_complete: false },
-        { onConflict: "mailbox_id" }
-      );
-    if (syncStateError) {
-      // Don't block the OAuth flow on this -- the mailbox is connected either way; worst case
-      // is the mailbox never shows the "setting up" state and stays empty until a manual resync.
-      console.error("Failed to initialize sync_state", syncStateError);
-    }
-
-    const origin = process.env.NEXT_PUBLIC_APP_URL ?? request.nextUrl.origin;
-    after(async () => {
-      try {
-        await fetch(`${origin}/api/internal/sync/${mailbox.id}/backfill`, {
-          method: "POST",
-          headers: { "x-internal-sync-secret": process.env.INTERNAL_SYNC_SECRET ?? "" },
-        });
-      } catch (err) {
-        console.error("Deferred initial backfill request failed", err);
-      }
-    });
 
     const res = NextResponse.redirect(
       new URL("/mail?mailbox=connected&provider=outlook", request.url)

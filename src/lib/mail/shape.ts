@@ -17,7 +17,6 @@ interface TrackingTokenRow {
 export interface EmailRow {
   id: string;
   mailbox_id: string;
-  provider_message_id: string | null;
   folder: FolderId;
   subject: string;
   from_name: string;

@@ -2,71 +2,44 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { getValidAccessToken } from "./token-refresh";
 import { escapeHtml } from "@/lib/mail/compose";
 import type {
-  FetchMessagesParams,
-  FetchMessagesResult,
+  ListMessagesParams,
+  ListMessagesResult,
   FetchMessageBodyParams,
   FetchMessageBodyResult,
   SyncableFolderId,
 } from "@/lib/providers/types";
 
 export const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
-const POLL_PAGE_GUARD = 5; // bound on how many nextLink pages one folder can page through per poll tick
 
 // "sentitems" is deliberately omitted -- outbound mail sent through this app is already
 // persisted (with tracking) by the send path, so syncing it here would create untracked
 // duplicates. Mail sent from the provider's own native UI never appears in Postmark's Sent
 // folder; accepted limitation for this module.
-const WELL_KNOWN_FOLDERS: { name: string; folder: SyncableFolderId }[] = [
-  { name: "inbox", folder: "inbox" },
-  { name: "drafts", folder: "drafts" },
-  { name: "archive", folder: "archive" },
-  { name: "deleteditems", folder: "trash" },
-];
+const WELL_KNOWN_FOLDERS: Record<Exclude<SyncableFolderId, "sent">, string> = {
+  inbox: "inbox",
+  drafts: "drafts",
+  archive: "archive",
+  trash: "deleteditems",
+};
 
-interface FolderCursorEntry {
-  link: string;
-  kind: "next" | "delta";
-}
-
-type GraphCursor = Partial<Record<string, FolderCursorEntry>>;
-
-function parseCursor(raw: string | null | undefined): GraphCursor {
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw) as GraphCursor;
-  } catch {
-    return {};
-  }
-}
-
-function isFolderPending(cursor: GraphCursor, folderName: string): boolean {
-  const entry = cursor[folderName];
-  return !entry || entry.kind === "next";
-}
-
-interface GraphDeltaMessage {
+interface GraphListMessage {
   id?: string;
   conversationId?: string;
+  subject?: string;
+  from?: { emailAddress?: { name?: string; address?: string } };
+  bodyPreview?: string;
   receivedDateTime?: string;
-  "@removed"?: { reason: string };
+  isRead?: boolean;
+  flag?: { flagStatus?: string };
 }
 
-interface GraphDeltaResponse {
-  value: GraphDeltaMessage[];
-  "@odata.nextLink"?: string;
-  "@odata.deltaLink"?: string;
+interface GraphListResponse {
+  value: GraphListMessage[];
 }
 
-// Module 6 (revised): initial fetch is bounded to the last 10 days, not full history.
-// Microsoft Graph's documented `$filter` support on `/messages/delta` is narrow and
-// inconsistent across mail resources, so the bound is enforced client-side here instead of
-// trusting a server-side `$filter` on the delta endpoint to compose correctly.
-const BACKFILL_WINDOW_MS = 10 * 24 * 60 * 60 * 1000;
-
-function isWithinBackfillWindow(receivedDateTime: string | undefined, cutoff: Date): boolean {
-  if (!receivedDateTime) return true; // no date to judge by -- don't drop it defensively
-  return new Date(receivedDateTime) >= cutoff;
-}
+// Bounded to the last 10 days rather than full history, to keep every live request fast.
+const LIST_WINDOW_MS = 10 * 24 * 60 * 60 * 1000;
+const LIST_PAGE_SIZE = 50;
 
 export class GraphHttpError extends Error {
   constructor(public status: number, message: string) {
@@ -112,125 +85,47 @@ export function graphPost(accessToken: string, url: string, body: unknown): Prom
   return graphSend(accessToken, "POST", url, body);
 }
 
-function extractMessages(
-  data: GraphDeltaResponse,
-  folder: SyncableFolderId,
-  backfillCutoff?: Date
-): FetchMessagesResult["messages"] {
-  return data.value
-    .filter(
-      (m): m is GraphDeltaMessage & { id: string } => Boolean(m.id) && !m["@removed"]
-    )
-    .filter((m) => !backfillCutoff || isWithinBackfillWindow(m.receivedDateTime, backfillCutoff))
-    .map((m) => ({ providerMessageId: m.id, threadId: m.conversationId ?? null, folder }));
-}
+/** Live, uncached folder listing -- one HTTP call per `GET /api/mail` call, nothing persisted.
+ * Graph's `$select` on the message-list endpoint returns everything the list view needs in a
+ * single round trip (unlike Gmail, which needs a per-message follow-up). */
+export async function listGraphMessages(
+  supabase: SupabaseClient,
+  params: ListMessagesParams
+): Promise<ListMessagesResult> {
+  if (params.folder === "sent") return { messages: [] };
 
-/**
- * Backfill: one HTTP call per `fetchMessages` invocation, advancing exactly one well-known
- * folder at a time through its initial `/delta` pagination (nextLink -> ... -> deltaLink).
- * `hasMore` stays true until every folder has reached its terminal deltaLink. This one-call-per-
- * page granularity is what lets the caller checkpoint `sync_state` after every page for a large
- * mailbox's initial history load.
- */
-async function backfillOneFolder(
-  accessToken: string,
-  cursorRaw: string | null | undefined
-): Promise<FetchMessagesResult> {
-  const cursor = parseCursor(cursorRaw);
-  const target = WELL_KNOWN_FOLDERS.find((f) => isFolderPending(cursor, f.name));
-  if (!target) {
-    return { messages: [], nextCursor: JSON.stringify(cursor), hasMore: false };
-  }
-
-  const existing = cursor[target.name];
+  const accessToken = await getValidAccessToken(supabase, params.mailboxId);
+  const folderName = WELL_KNOWN_FOLDERS[params.folder];
+  const cutoff = new Date(Date.now() - LIST_WINDOW_MS).toISOString();
+  const select = "id,conversationId,subject,from,bodyPreview,receivedDateTime,isRead,flag";
   const url =
-    existing?.link ??
-    `${GRAPH_BASE}/me/mailFolders/${target.name}/messages/delta?$select=id,conversationId,receivedDateTime`;
-  const backfillCutoff = new Date(Date.now() - BACKFILL_WINDOW_MS);
+    `${GRAPH_BASE}/me/mailFolders/${folderName}/messages` +
+    `?$select=${select}&$filter=receivedDateTime ge ${cutoff}` +
+    `&$orderby=receivedDateTime desc&$top=${LIST_PAGE_SIZE}`;
 
-  let data: GraphDeltaResponse;
+  let data: GraphListResponse;
   try {
-    data = await graphGet<GraphDeltaResponse>(accessToken, url);
+    data = await graphGet<GraphListResponse>(accessToken, url);
   } catch (err) {
-    if (err instanceof GraphHttpError && err.status === 404) {
-      // This account has no folder by this well-known name (e.g. no Archive) -- mark it
-      // done-and-empty rather than failing the whole mailbox.
-      cursor[target.name] = { link: "", kind: "delta" };
-      return {
-        messages: [],
-        nextCursor: JSON.stringify(cursor),
-        hasMore: WELL_KNOWN_FOLDERS.some((f) => isFolderPending(cursor, f.name)),
-      };
-    }
+    // This account has no folder by this well-known name (e.g. no Archive) -- treat as empty.
+    if (err instanceof GraphHttpError && err.status === 404) return { messages: [] };
     throw err;
   }
 
-  if (data["@odata.nextLink"]) {
-    cursor[target.name] = { link: data["@odata.nextLink"], kind: "next" };
-  } else if (data["@odata.deltaLink"]) {
-    cursor[target.name] = { link: data["@odata.deltaLink"], kind: "delta" };
-  }
+  const messages = data.value
+    .filter((m): m is GraphListMessage & { id: string } => Boolean(m.id))
+    .map((m) => ({
+      providerMessageId: m.id,
+      threadId: m.conversationId ?? null,
+      subject: m.subject ?? "",
+      from: { name: m.from?.emailAddress?.name ?? "", email: m.from?.emailAddress?.address ?? "" },
+      previewText: m.bodyPreview ?? "",
+      sentAt: m.receivedDateTime ?? new Date().toISOString(),
+      unread: m.isRead === false,
+      starred: m.flag?.flagStatus === "flagged",
+    }));
 
-  return {
-    messages: extractMessages(data, target.folder, backfillCutoff),
-    nextCursor: JSON.stringify(cursor),
-    hasMore: WELL_KNOWN_FOLDERS.some((f) => isFolderPending(cursor, f.name)),
-  };
-}
-
-/**
- * Poll: re-checks EVERY well-known folder's stored deltaLink for changes in one call (unlike
- * backfill, poll cursors always start with all 4 folders already at their terminal "delta"
- * state, so there is no "pending folder" to find -- every folder needs exactly one refresh
- * check each tick). Small per-tick payloads expected, so this drains internally (bounded
- * nextLink following per folder) rather than splitting across multiple job-loop iterations.
- * Always returns `hasMore: false`, mirroring Gmail's poll shape.
- */
-async function pollAllFolders(
-  accessToken: string,
-  cursorRaw: string | null | undefined
-): Promise<FetchMessagesResult> {
-  const cursor = parseCursor(cursorRaw);
-  const messages: FetchMessagesResult["messages"] = [];
-
-  for (const { name, folder } of WELL_KNOWN_FOLDERS) {
-    const startLink =
-      cursor[name]?.link ||
-      `${GRAPH_BASE}/me/mailFolders/${name}/messages/delta?$select=id,conversationId`;
-
-    let page: GraphDeltaResponse;
-    try {
-      page = await graphGet<GraphDeltaResponse>(accessToken, startLink);
-    } catch (err) {
-      if (err instanceof GraphHttpError && err.status === 404) {
-        cursor[name] = { link: "", kind: "delta" };
-        continue;
-      }
-      throw err;
-    }
-    messages.push(...extractMessages(page, folder));
-
-    let guard = 0;
-    while (page["@odata.nextLink"] && guard < POLL_PAGE_GUARD) {
-      page = await graphGet<GraphDeltaResponse>(accessToken, page["@odata.nextLink"]);
-      messages.push(...extractMessages(page, folder));
-      guard += 1;
-    }
-
-    cursor[name] = { link: page["@odata.deltaLink"] ?? cursor[name]?.link ?? "", kind: "delta" };
-  }
-
-  return { messages, nextCursor: JSON.stringify(cursor), hasMore: false };
-}
-
-export async function fetchGraphMessages(
-  supabase: SupabaseClient,
-  params: FetchMessagesParams
-): Promise<FetchMessagesResult> {
-  const accessToken = await getValidAccessToken(supabase, params.mailboxId);
-  return params.mode === "poll"
-    ? pollAllFolders(accessToken, params.cursor)
-    : backfillOneFolder(accessToken, params.cursor);
+  return { messages };
 }
 
 interface GraphEmailAddress {
@@ -295,7 +190,7 @@ export async function fetchGraphMessageBody(
     bodyHtml,
     bodyText,
     sentAt: data.sentDateTime ?? data.receivedDateTime ?? new Date().toISOString(),
-    // folder intentionally omitted -- Graph already resolves it during fetchMessages.
+    // folder intentionally omitted -- Graph already resolves it during listMessages.
     unread: data.isRead === false,
     starred: data.flag?.flagStatus === "flagged",
   };

@@ -3,32 +3,17 @@ import { google, gmail_v1 } from "googleapis";
 import { createGoogleOAuthClient } from "./oauth-client";
 import { getValidAccessToken } from "./token-refresh";
 import { escapeHtml } from "@/lib/mail/compose";
+import { mapWithConcurrency } from "@/lib/sync/concurrency";
 import type {
-  FetchMessagesParams,
-  FetchMessagesResult,
+  ListMessagesParams,
+  ListMessagesResult,
   FetchMessageBodyParams,
   FetchMessageBodyResult,
   SyncableFolderId,
 } from "@/lib/providers/types";
 
-const BACKFILL_PAGE_SIZE = 50;
-const MAX_HISTORY_PAGES = 10;
-
-/** Thrown when Gmail rejects `startHistoryId` as stale/invalid (404) -- the only startHistoryId
- * still valid after this is "none," so the caller must fall back to a fresh backfill. */
-export class GmailHistoryGapError extends Error {
-  constructor() {
-    super("Gmail historyId is stale or invalid -- a fresh backfill is required");
-    this.name = "GmailHistoryGapError";
-  }
-}
-
-function isNotFound(err: unknown): boolean {
-  const status = (err as { response?: { status?: number }; code?: number | string })?.response
-    ?.status;
-  const code = (err as { code?: number | string })?.code;
-  return status === 404 || code === 404;
-}
+const LIST_PAGE_SIZE = 50;
+const LIST_FETCH_CONCURRENCY = 5;
 
 export async function getGmailClient(supabase: SupabaseClient, mailboxId: string) {
   const accessToken = await getValidAccessToken(supabase, mailboxId);
@@ -37,79 +22,68 @@ export async function getGmailClient(supabase: SupabaseClient, mailboxId: string
   return google.gmail({ version: "v1", auth: client });
 }
 
-export async function fetchGmailMessages(
+/** Live, uncached folder listing -- runs on every `GET /api/mail` call, nothing is persisted.
+ * Gmail's `messages.list` only returns ids, so a `format: "metadata"` follow-up per message
+ * (lighter than `format: "full"` -- no body download) fills in what the list view needs. */
+export async function listGmailMessages(
   supabase: SupabaseClient,
-  params: FetchMessagesParams
-): Promise<FetchMessagesResult> {
+  params: ListMessagesParams
+): Promise<ListMessagesResult> {
   const gmail = await getGmailClient(supabase, params.mailboxId);
 
-  if (params.mode === "backfill") {
-    const { data } = await gmail.users.messages.list({
-      userId: "me",
-      maxResults: BACKFILL_PAGE_SIZE,
-      pageToken: params.cursor ?? undefined,
-      // Gmail excludes Trash (and Spam) from list results by default -- without this, the
-      // "trash" folder mapping below would never actually be reachable during backfill.
-      includeSpamTrash: true,
-      // Module 6 (revised): initial fetch is bounded to the last 10 days, not full history --
-      // must be resent identically on every page, since `pageToken` alone doesn't remember `q`.
-      q: "newer_than:10d",
-    });
+  const { data } = await gmail.users.messages.list({
+    userId: "me",
+    maxResults: LIST_PAGE_SIZE,
+    // Gmail excludes Trash (and Spam) from list results by default -- without this, the "trash"
+    // folder would never return anything.
+    includeSpamTrash: true,
+    // Bounded to a recent window rather than full history, to keep every live request fast.
+    q: `newer_than:10d ${gmailQueryForFolder(params.folder)}`,
+  });
 
-    const messages = (data.messages ?? [])
-      .filter((m): m is { id: string; threadId?: string | null } => Boolean(m.id))
-      .map((m) => ({ providerMessageId: m.id, threadId: m.threadId ?? null }));
+  const ids = (data.messages ?? [])
+    .map((m) => m.id)
+    .filter((id): id is string => Boolean(id));
 
-    if (data.nextPageToken) {
-      return { messages, nextCursor: data.nextPageToken, hasMore: true };
-    }
+  const items = await mapWithConcurrency(ids, LIST_FETCH_CONCURRENCY, (id) =>
+    gmail.users.messages.get({ userId: "me", id, format: "metadata", metadataHeaders: ["Subject", "From"] })
+  );
 
-    // Last backfill page: seed the poll cursor with the mailbox's current historyId so the
-    // very next poll tick picks up from here with no gap.
-    const { data: profile } = await gmail.users.getProfile({ userId: "me" });
-    return { messages, nextCursor: profile.historyId ?? null, hasMore: false };
+  const messages = items
+    .map(({ data: m }) => {
+      const headers = m.payload?.headers;
+      const fromAddresses = parseAddressHeader(headerValue(headers, "From"));
+      const internalDateMs = Number(m.internalDate);
+      return {
+        providerMessageId: m.id ?? "",
+        threadId: m.threadId ?? null,
+        subject: headerValue(headers, "Subject"),
+        from: fromAddresses[0] ?? { name: "", email: "" },
+        previewText: m.snippet ?? "",
+        sentAt: new Date(Number.isFinite(internalDateMs) ? internalDateMs : Date.now()).toISOString(),
+        unread: (m.labelIds ?? []).includes("UNREAD"),
+        starred: (m.labelIds ?? []).includes("STARRED"),
+      };
+    })
+    .filter((m) => m.providerMessageId);
+
+  return { messages };
+}
+
+/** Gmail has no per-folder listing endpoint -- `q` search operators stand in for it. */
+function gmailQueryForFolder(folder: SyncableFolderId): string {
+  switch (folder) {
+    case "inbox":
+      return "in:inbox";
+    case "drafts":
+      return "in:drafts";
+    case "archive":
+      return "-in:inbox -in:trash -in:drafts -in:sent";
+    case "trash":
+      return "in:trash";
+    case "sent":
+      return "in:sent";
   }
-
-  // mode === "poll" -- caller guarantees backfill already ran, so a historyId cursor exists.
-  if (!params.cursor) {
-    throw new Error("Gmail poll requires a startHistoryId cursor");
-  }
-
-  const messages: FetchMessagesResult["messages"] = [];
-  const seen = new Set<string>();
-  let pageToken: string | undefined;
-  let latestHistoryId = params.cursor;
-
-  for (let i = 0; i < MAX_HISTORY_PAGES; i++) {
-    let data: gmail_v1.Schema$ListHistoryResponse;
-    try {
-      ({ data } = await gmail.users.history.list({
-        userId: "me",
-        startHistoryId: params.cursor,
-        historyTypes: ["messageAdded"],
-        pageToken,
-      }));
-    } catch (err) {
-      if (isNotFound(err)) throw new GmailHistoryGapError();
-      throw err;
-    }
-
-    for (const record of data.history ?? []) {
-      for (const added of record.messagesAdded ?? []) {
-        const id = added.message?.id;
-        if (id && !seen.has(id)) {
-          seen.add(id);
-          messages.push({ providerMessageId: id, threadId: added.message?.threadId ?? null });
-        }
-      }
-    }
-
-    if (data.historyId) latestHistoryId = data.historyId;
-    pageToken = data.nextPageToken ?? undefined;
-    if (!pageToken) break;
-  }
-
-  return { messages, nextCursor: latestHistoryId, hasMore: false };
 }
 
 function findPart(

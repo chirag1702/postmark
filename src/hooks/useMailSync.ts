@@ -44,9 +44,10 @@ export function useMailSync() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountIds]);
 
-  // Ongoing poll: re-fetch already-loaded accounts periodically so mail the server-side sync
-  // job (Module 6) writes to Postgres shows up without a manual page reload. This is a cheap
-  // client-side refresh, not a replacement for real push (a future module).
+  // Ongoing poll: re-fetch already-loaded accounts periodically -- inbound folders are fetched
+  // live from the provider on every call, so this is what surfaces new mail without a manual
+  // page reload. This is a cheap client-side refresh, not a replacement for real push (a future
+  // module).
   useEffect(() => {
     const loaded = mail.accounts.filter((a) => mail.emailsLoaded[a.id]);
     if (loaded.length === 0) return;

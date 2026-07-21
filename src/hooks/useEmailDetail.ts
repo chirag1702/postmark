@@ -16,7 +16,7 @@ export function useEmailDetail() {
 
     (async () => {
       try {
-        const res = await fetch(`/api/mail/${selectedEmailId}`);
+        const res = await fetch(`/api/mail/${encodeURIComponent(selectedEmailId)}`);
         if (!res.ok || cancelled) return;
         const email: Email = await res.json();
         if (!cancelled) {
