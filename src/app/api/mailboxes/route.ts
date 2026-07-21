@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { MAILBOX_SELECT, shapeMailbox, type MailboxRow } from "@/lib/mailboxes/shape";
 
 export async function GET() {
   const supabase = await createClient();
@@ -14,9 +15,7 @@ export async function GET() {
 
   const { data, error } = await supabase
     .from("mailboxes")
-    .select(
-      "id, email, provider, is_default, send_pin_hash, lock_pin_hash, sync_state(backfill_complete)"
-    )
+    .select(MAILBOX_SELECT)
     .eq("user_id", user.id)
     .order("created_at", { ascending: true });
 
@@ -24,23 +23,5 @@ export async function GET() {
     return NextResponse.json({ error: "Failed to load mailboxes" }, { status: 500 });
   }
 
-  return NextResponse.json(
-    data.map((m) => {
-      // Supabase's embedded-relation shape depends on whether it infers a to-one relationship;
-      // `sync_state.mailbox_id` is a PK/unique FK so it should come back as an object, but a
-      // freshly-connected mailbox may have no sync_state row yet at all -- default to `false`
-      // (not ready), never `true`, when the row is missing.
-      const syncState = Array.isArray(m.sync_state) ? m.sync_state[0] : m.sync_state;
-      return {
-        id: m.id,
-        email: m.email,
-        provider: m.provider,
-        isDefault: m.is_default,
-        sendPin: m.send_pin_hash ? "set" : null,
-        lockPin: m.lock_pin_hash ? "set" : null,
-        locked: false,
-        backfillComplete: syncState?.backfill_complete ?? false,
-      };
-    })
-  );
+  return NextResponse.json(data.map((m) => shapeMailbox(m as unknown as MailboxRow)));
 }

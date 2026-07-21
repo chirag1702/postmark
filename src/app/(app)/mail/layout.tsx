@@ -7,6 +7,7 @@ import { MainPanel } from "@/components/shell/MainPanel";
 import { ComposeDrawer } from "@/components/compose/ComposeDrawer";
 import { SettingsModal } from "@/components/settings/SettingsModal";
 import { MailboxConnectStatusHandler } from "@/components/settings/MailboxConnectStatusHandler";
+import { MAILBOX_SELECT, shapeMailbox, type MailboxRow } from "@/lib/mailboxes/shape";
 import type { Mailbox, User } from "@/types";
 
 export default async function MailLayout({
@@ -37,19 +38,13 @@ export default async function MailLayout({
 
   const { data: mailboxRows } = await supabase
     .from("mailboxes")
-    .select("id, email, provider, is_default, send_pin_hash, lock_pin_hash")
+    .select(MAILBOX_SELECT)
     .eq("user_id", user.id)
     .order("created_at", { ascending: true });
 
-  const initialAccounts: Mailbox[] = (mailboxRows ?? []).map((m) => ({
-    id: m.id,
-    email: m.email,
-    provider: m.provider,
-    isDefault: m.is_default,
-    sendPin: m.send_pin_hash ? "set" : null,
-    lockPin: m.lock_pin_hash ? "set" : null,
-    locked: false,
-  }));
+  const initialAccounts: Mailbox[] = (mailboxRows ?? []).map((m) =>
+    shapeMailbox(m as unknown as MailboxRow)
+  );
 
   return (
     <AppStateProvider initialUser={initialUser} initialAccounts={initialAccounts}>
