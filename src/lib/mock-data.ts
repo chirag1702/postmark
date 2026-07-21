@@ -12,6 +12,4 @@ export const FOLDERS: Folder[] = [
 export const CONNECTABLE_PROVIDERS: { id: ProviderId; label: string; mark: string }[] = [
   { id: "gmail", label: "Gmail", mark: "G" },
   { id: "outlook", label: "Outlook", mark: "O" },
-  { id: "hotmail", label: "Hotmail", mark: "H" },
-  { id: "icloud", label: "iCloud", mark: "i" },
 ];

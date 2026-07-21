@@ -1,6 +1,6 @@
 "use client";
 
-import { useAppState } from "@/context/app-state-context";
+import { useState } from "react";
 import { CONNECTABLE_PROVIDERS } from "@/lib/mock-data";
 import { ProviderConnectButton } from "./ProviderConnectButton";
 
@@ -10,8 +10,7 @@ const CONNECT_ROUTES: Partial<Record<string, string>> = {
 };
 
 export function ProviderConnectGrid() {
-  const { mail } = useAppState();
-  const linkedProviders = new Set(mail.accounts.map((a) => a.provider));
+  const [loadingProviderId, setLoadingProviderId] = useState<string | null>(null);
 
   return (
     <div className="grid grid-cols-2 gap-2.5">
@@ -22,13 +21,17 @@ export function ProviderConnectGrid() {
             key={provider.id}
             label={provider.label}
             mark={provider.mark}
-            // Gmail (Module 2) and Outlook (Module 4) have real OAuth connect flows.
-            // Hotmail/iCloud remain out of scope. Disabled rather than left fabricating
-            // a client-only mailbox, which would vanish on next navigation now that
-            // `accounts` is server-hydrated.
-            disabled={!connectHref || linkedProviders.has(provider.id)}
+            // Gmail (Module 2) and Outlook (Module 4) have real OAuth connect flows; every
+            // provider here has one, so this only ever disables on an unmapped future entry.
+            // Not gated on already-linked accounts -- a user can connect multiple mailboxes
+            // from the same provider (e.g. two Gmail accounts), and the backend's uniqueness
+            // constraint is per-email, not per-provider.
+            disabled={!connectHref}
+            loading={loadingProviderId === provider.id}
             onClick={() => {
-              if (connectHref) window.location.href = connectHref;
+              if (!connectHref) return;
+              setLoadingProviderId(provider.id);
+              window.location.href = connectHref;
             }}
           />
         );
