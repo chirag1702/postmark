@@ -19,6 +19,77 @@ export function MailboxCard({ account }: MailboxCardProps) {
   const [editingLockPin, setEditingLockPin] = useState(false);
   const [isUnlinking, setIsUnlinking] = useState(false);
   const [unlinkError, setUnlinkError] = useState<string | null>(null);
+  const [savingSendPin, setSavingSendPin] = useState(false);
+  const [sendPinError, setSendPinError] = useState<string | null>(null);
+  const [savingLockPin, setSavingLockPin] = useState(false);
+  const [lockPinError, setLockPinError] = useState<string | null>(null);
+
+  async function updatePin(kind: "send" | "lock", pin: string | null) {
+    const res = await fetch(`/api/mailboxes/${account.id}/${kind}-pin`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pin }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error ?? `Failed to update ${kind} PIN.`);
+    }
+    dispatch({
+      type: kind === "send" ? "SET_ACCOUNT_SEND_PIN" : "SET_ACCOUNT_LOCK_PIN",
+      accountId: account.id,
+      pin,
+    });
+  }
+
+  const handleTurnOffSendPin = async () => {
+    setSavingSendPin(true);
+    setSendPinError(null);
+    try {
+      await updatePin("send", null);
+    } catch (e) {
+      setSendPinError(e instanceof Error ? e.message : "Failed to update send PIN.");
+    } finally {
+      setSavingSendPin(false);
+    }
+  };
+
+  const handleSaveSendPin = async (pin: string) => {
+    setSavingSendPin(true);
+    setSendPinError(null);
+    try {
+      await updatePin("send", pin);
+      setEditingSendPin(false);
+    } catch (e) {
+      setSendPinError(e instanceof Error ? e.message : "Failed to update send PIN.");
+    } finally {
+      setSavingSendPin(false);
+    }
+  };
+
+  const handleTurnOffLockPin = async () => {
+    setSavingLockPin(true);
+    setLockPinError(null);
+    try {
+      await updatePin("lock", null);
+    } catch (e) {
+      setLockPinError(e instanceof Error ? e.message : "Failed to update lock PIN.");
+    } finally {
+      setSavingLockPin(false);
+    }
+  };
+
+  const handleSaveLockPin = async (pin: string) => {
+    setSavingLockPin(true);
+    setLockPinError(null);
+    try {
+      await updatePin("lock", pin);
+      setEditingLockPin(false);
+    } catch (e) {
+      setLockPinError(e instanceof Error ? e.message : "Failed to update lock PIN.");
+    } finally {
+      setSavingLockPin(false);
+    }
+  };
 
   const handleUnlink = async () => {
     setIsUnlinking(true);
@@ -73,27 +144,21 @@ export function MailboxCard({ account }: MailboxCardProps) {
         description="Require a PIN before sending from this mailbox."
         enabled={!!account.sendPin}
         editing={editingSendPin}
+        disabled={savingSendPin}
         onToggleEdit={() => setEditingSendPin((v) => !v)}
-        onTurnOff={() =>
-          dispatch({
-            type: "SET_ACCOUNT_SEND_PIN",
-            accountId: account.id,
-            pin: null,
-          })
-        }
+        onTurnOff={handleTurnOffSendPin}
       />
+      {sendPinError && (
+        <div className="border-t border-hairline-row bg-surface-card px-4 py-2">
+          <InlineStatus
+            message={sendPinError}
+            type="error"
+            onClear={() => setSendPinError(null)}
+          />
+        </div>
+      )}
       {editingSendPin && (
-        <PinEditPanel
-          onSave={(pin) => {
-            dispatch({
-              type: "SET_ACCOUNT_SEND_PIN",
-              accountId: account.id,
-              pin,
-            });
-            setEditingSendPin(false);
-          }}
-          onCancel={() => setEditingSendPin(false)}
-        />
+        <PinEditPanel onSave={handleSaveSendPin} onCancel={() => setEditingSendPin(false)} />
       )}
 
       <SecurityToggleRow
@@ -101,27 +166,21 @@ export function MailboxCard({ account }: MailboxCardProps) {
         description="Require a PIN to read this mailbox after it's idle."
         enabled={!!account.lockPin}
         editing={editingLockPin}
+        disabled={savingLockPin}
         onToggleEdit={() => setEditingLockPin((v) => !v)}
-        onTurnOff={() =>
-          dispatch({
-            type: "SET_ACCOUNT_LOCK_PIN",
-            accountId: account.id,
-            pin: null,
-          })
-        }
+        onTurnOff={handleTurnOffLockPin}
       />
+      {lockPinError && (
+        <div className="border-t border-hairline-row bg-surface-card px-4 py-2">
+          <InlineStatus
+            message={lockPinError}
+            type="error"
+            onClear={() => setLockPinError(null)}
+          />
+        </div>
+      )}
       {editingLockPin && (
-        <PinEditPanel
-          onSave={(pin) => {
-            dispatch({
-              type: "SET_ACCOUNT_LOCK_PIN",
-              accountId: account.id,
-              pin,
-            });
-            setEditingLockPin(false);
-          }}
-          onCancel={() => setEditingLockPin(false)}
-        />
+        <PinEditPanel onSave={handleSaveLockPin} onCancel={() => setEditingLockPin(false)} />
       )}
     </div>
   );

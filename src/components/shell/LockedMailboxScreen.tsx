@@ -11,21 +11,38 @@ export function LockedMailboxScreen() {
   const { mail, dispatch } = useAppState();
   const [pin, setPin] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
   const account = getActiveAccount(mail.accounts, mail.activeAccountId);
 
-  const handleSubmit = (event: FormEvent) => {
+  const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!account) return;
-    if (pin === account.lockPin) {
+    if (!account || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/mailboxes/${account.id}/unlock`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin }),
+      });
+      if (res.status === 403) {
+        setError("Incorrect PIN. Try again.");
+        return;
+      }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? "Failed to unlock mailbox.");
+      }
       dispatch({
         type: "SET_ACCOUNT_LOCKED",
         accountId: account.id,
         locked: false,
       });
       setPin("");
-      setError(null);
-    } else {
-      setError("Incorrect PIN. Try again.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to unlock mailbox.");
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -53,8 +70,8 @@ export function LockedMailboxScreen() {
           autoFocus
         />
         {error && <p className="text-[12px] text-danger-text">{error}</p>}
-        <Button type="submit" className="w-full" size="sm">
-          Unlock mailbox
+        <Button type="submit" className="w-full" size="sm" disabled={submitting}>
+          {submitting ? "Unlocking…" : "Unlock mailbox"}
         </Button>
       </form>
     </div>

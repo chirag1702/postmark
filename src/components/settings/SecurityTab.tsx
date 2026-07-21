@@ -13,21 +13,53 @@ export function SecurityTab() {
     message: string;
     type: "success" | "error";
   } | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
-  const handleSubmit = (event: FormEvent) => {
+  const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
     if (!current || !next) {
       setStatus({ message: "Fill in all fields.", type: "error" });
+      return;
+    }
+    if (next.length < 8) {
+      setStatus({
+        message: "New password must be at least 8 characters.",
+        type: "error",
+      });
       return;
     }
     if (next !== confirm) {
       setStatus({ message: "New passwords don't match.", type: "error" });
       return;
     }
-    setStatus({ message: "Password updated.", type: "success" });
-    setCurrent("");
-    setNext("");
-    setConfirm("");
+    setSubmitting(true);
+    setStatus(null);
+    try {
+      const res = await fetch("/api/user/password", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ currentPassword: current, newPassword: next }),
+      });
+      if (res.status === 401) {
+        setStatus({ message: "Current password is incorrect.", type: "error" });
+        return;
+      }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? "Failed to update password.");
+      }
+      setStatus({ message: "Password updated.", type: "success" });
+      setCurrent("");
+      setNext("");
+      setConfirm("");
+    } catch (e) {
+      setStatus({
+        message: e instanceof Error ? e.message : "Failed to update password.",
+        type: "error",
+      });
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -60,8 +92,8 @@ export function SecurityTab() {
           onChange={(e) => setConfirm(e.target.value)}
         />
         <div className="mt-1 flex items-center gap-3">
-          <Button type="submit" size="sm">
-            Update password
+          <Button type="submit" size="sm" disabled={submitting}>
+            {submitting ? "Updating…" : "Update password"}
           </Button>
           <InlineStatus
             message={status?.message ?? null}

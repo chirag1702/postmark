@@ -7,6 +7,7 @@ interface SecurityToggleRowProps {
   description: string;
   enabled: boolean;
   editing: boolean;
+  disabled?: boolean;
   onToggleEdit: () => void;
   onTurnOff: () => void;
 }
@@ -16,6 +17,7 @@ export function SecurityToggleRow({
   description,
   enabled,
   editing,
+  disabled,
   onToggleEdit,
   onTurnOff,
 }: SecurityToggleRowProps) {
@@ -26,11 +28,11 @@ export function SecurityToggleRow({
         <p className="text-[12px] text-ink-meta">{description}</p>
       </div>
       <div className="flex shrink-0 items-center gap-2">
-        <Button variant="secondary" size="sm" onClick={onToggleEdit}>
+        <Button variant="secondary" size="sm" disabled={disabled} onClick={onToggleEdit}>
           {editing ? "Cancel" : enabled ? "Change" : "Enable"}
         </Button>
         {enabled && !editing && (
-          <Button variant="danger" size="sm" onClick={onTurnOff}>
+          <Button variant="danger" size="sm" disabled={disabled} onClick={onTurnOff}>
             Turn off
           </Button>
         )}

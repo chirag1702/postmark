@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { MAILBOX_SELECT, shapeMailbox, type MailboxRow } from "@/lib/mailboxes/shape";
+import { getUnlockedMailboxIds } from "@/lib/mailboxes/session-unlocks";
 
 export async function GET() {
   const supabase = await createClient();
@@ -23,5 +24,9 @@ export async function GET() {
     return NextResponse.json({ error: "Failed to load mailboxes" }, { status: 500 });
   }
 
-  return NextResponse.json(data.map((m) => shapeMailbox(m as unknown as MailboxRow)));
+  const unlockedMailboxIds = await getUnlockedMailboxIds(supabase, user.id);
+
+  return NextResponse.json(
+    data.map((m) => shapeMailbox(m as unknown as MailboxRow, unlockedMailboxIds))
+  );
 }

@@ -15,7 +15,7 @@ export interface MailboxRow {
 /** Shared DB-row -> client `Mailbox` mapper, used by both `GET /api/mailboxes` and the `/mail`
  * layout's initial server-side hydration, so this shaping logic can't drift between the two call
  * sites. */
-export function shapeMailbox(row: MailboxRow): Mailbox {
+export function shapeMailbox(row: MailboxRow, unlockedMailboxIds: Set<string>): Mailbox {
   return {
     id: row.id,
     email: row.email,
@@ -23,6 +23,6 @@ export function shapeMailbox(row: MailboxRow): Mailbox {
     isDefault: row.is_default,
     sendPin: row.send_pin_hash ? "set" : null,
     lockPin: row.lock_pin_hash ? "set" : null,
-    locked: false,
+    locked: !!row.lock_pin_hash && !unlockedMailboxIds.has(row.id),
   };
 }
