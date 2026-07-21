@@ -1,6 +1,6 @@
 "use client";
 
-import { Mail } from "lucide-react";
+import { Loader2, Mail } from "lucide-react";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { useAppState } from "@/context/app-state-context";
 import { useMailSearch } from "@/hooks/useMailSearch";
@@ -12,6 +12,7 @@ export function EmailList() {
   const { mail, dispatch } = useAppState();
   const isSearching = mail.searchQuery.trim().length > 0;
   const { results: searchResults, loading: searchLoading } = useMailSearch(mail.searchQuery);
+  const isLoadingAccountMail = !isSearching && !mail.emailsLoaded[mail.activeAccountId];
 
   const emails = isSearching
     ? searchResults
@@ -21,6 +22,17 @@ export function EmailList() {
         mail.activeFolderId,
         mail.searchQuery
       );
+
+  if (isLoadingAccountMail) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <EmptyState
+          icon={<Loader2 size={20} strokeWidth={1.5} className="animate-spin" />}
+          title="Loading mail…"
+        />
+      </div>
+    );
+  }
 
   if (emails.length === 0) {
     const title = isSearching
