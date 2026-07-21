@@ -1,26 +1,160 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+@theme {
+  /* Fonts */
+  --font-sans: var(--font-instrument-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, monospace;
+
+  /* Colors - surfaces */
+  --color-surface-page: #f0eee9;
+  --color-surface-card: #ffffff;
+  --color-surface-input: #faf9f6;
+  --color-surface-search: #f5f3ef;
+  --color-surface-row-hover: #f6f4f0;
+  --color-surface-row-selected: #f2f0ec;
+  --color-surface-avatar-light: #e6e2da;
+  --color-surface-nav-active: #e6e2da;
+  --color-surface-account-hover: #e9e6df;
+
+  /* Colors - ink (text) */
+  --color-ink-on-dark: #f7f6f3;
+  --color-ink-primary: #1b1a18;
+  --color-ink-body: #2a2822;
+  --color-ink-button-secondary: #4a463f;
+  --color-ink-avatar-initials: #57534b;
+  --color-ink-nav-inactive: #5c584f;
+  --color-ink-label: #6b6860;
+  --color-ink-muted: #8a867e;
+  --color-ink-meta: #9a968f;
+  --color-ink-faint: #a8a49c;
+  --color-ink-icon-empty: #bdb9b0;
+  --color-ink-icon-dim: #c8c4bc;
+
+  /* Colors - hairline (borders) */
+  --color-hairline: #e7e4dd;
+  --color-hairline-input: #e2dfd8;
+  --color-hairline-soft: #edeae3;
+  --color-hairline-softer: #ece9e2;
+  --color-hairline-strong: #e0ddd5;
+  --color-hairline-field: #e4e0d8;
+  --color-hairline-row: #f0ede6;
+
+  /* Colors - scrollbar */
+  --color-scrollbar-track: #dcd9d2;
+  --color-scrollbar-thumb: #c9c5bc;
+
+  /* Colors - semantic */
+  --color-gold-star: #c9a227;
+  --color-danger-text: #a3392f;
+  --color-danger-bg: #fbeeec;
+  --color-danger-border: #f2d9d4;
+  --color-success-text: #3f7d4f;
+
+  /* Overlay */
+  --color-overlay-backdrop: rgba(28, 24, 18, 0.34);
+
+  /* Auth gradient */
+  --color-auth-gradient-from: #f7f5f1;
+  --color-auth-gradient-to: #eae7e0;
+
+  /* Radii (additive, does not override Tailwind defaults) */
+  --radius-xs: 3px;
+  --radius-sm: 5px;
+  --radius-7: 7px;
+  --radius-9: 9px;
+  --radius-10: 10px;
+  --radius-11: 11px;
+  --radius-12: 12px;
+  --radius-14: 14px;
+  --radius-16: 16px;
+  --radius-18: 18px;
+
+  /* Shadows */
+  --shadow-compose-btn: 0 1px 2px rgba(0, 0, 0, 0.18);
+  --shadow-panel: 0 1px 3px rgba(30, 28, 24, 0.04);
+  --shadow-auth-card: 0 12px 40px rgba(28, 24, 18, 0.08);
+  --shadow-account-dropdown: 0 14px 44px rgba(28, 24, 18, 0.18);
+  --shadow-modal: 0 24px 70px rgba(28, 24, 18, 0.3);
+  --shadow-compose-drawer: 0 -8px 40px rgba(28, 24, 18, 0.18);
+
+  /* Letter spacing */
+  --tracking-heading: -0.02em;
+  --tracking-mono-label: 0.06em;
+  --tracking-mono-label-wide: 0.09em;
+  --tracking-pin: 0.35em;
+
+  /* Animations */
+  --animate-compose-in: composeIn 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+  --animate-fade-in: fadeIn 0.18s ease-out;
+  --animate-pop-in: popIn 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+  --animate-pulse-seen: pulseSeen 0.6s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+@keyframes composeIn {
+  0% {
+    transform: translateY(24px);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+@keyframes fadeIn {
+  0% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes popIn {
+  0% {
+    transform: scale(0.97);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes pulseSeen {
+  0% {
+    transform: scale(0.4);
+    opacity: 0.4;
+  }
+  60% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
   }
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-surface-page);
+  color: var(--color-ink-body);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-scrollbar-thumb);
+  border-radius: 8px;
+}
+
+::placeholder {
+  color: var(--color-ink-faint);
 }
